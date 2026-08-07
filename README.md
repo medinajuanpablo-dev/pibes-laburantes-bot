@@ -11,6 +11,9 @@ process manager or a second file, re-read that sentence first.
 Everything lives in one file, `bot.py`. Its self-check lives in the same file and runs with
 `python bot.py --self-check`.
 
+**Here to host the bot for a while, not to work on it?** Read `EMPEZAR-ACA.md` — it is in Spanish
+and it is the only file you need.
+
 ---
 
 ## 1. How it works
@@ -52,6 +55,7 @@ token.** That is what makes the self-check possible.
 | `telegram_renders_inline(container, codec)` | mp4 container and not AV1 |
 | `is_image_post(info)` | the post has **no** video formats, **has** thumbnails, and is not a carousel |
 | `oversize_reply(bytes, link)` | the Spanish fallback message |
+| `conflict_action(now, started, last)` | `announce` · `quiet` · `give-up` for a poll conflict — §2.1 |
 
 ---
 
@@ -79,6 +83,34 @@ nohup .venv/bin/python bot.py > ~/the-bot.log 2>&1 &
 
 `tmux` or `screen` work equally well. **There is deliberately no `systemd` unit and no `launchd`
 plist in this repo** — see §6.
+
+### 2.1 The baton pass
+
+The owner cannot keep his laptop on all the time, so hosting rotates: whoever is around
+double-clicks a launcher and hosts the bot until they close the window. `run-bot.command` is the
+macOS one, `run-bot.cmd` the Windows one (**untested on real Windows** — see `docs/updating.md`).
+Each one checks for updates, Python 3.11+, ffmpeg, the venv, the token and whether anybody else is
+already polling, and prints one Spanish sentence per failure. The friend-facing instructions are
+`EMPEZAR-ACA.md`, in Spanish, because the audience is.
+
+Three things follow from the design and are not obvious:
+
+- **Only one person can host at a time.** Telegram allows exactly one poller per token (§4.9), so
+  this is a baton pass, not parallelism. The launcher asks before taking over.
+- **Distribution is `git clone`, never a downloaded zip**, and that is also the update channel: each
+  launcher runs `git pull --ff-only` on startup, so the owner pushes and every friend gets the
+  change on their next double-click. It also side-steps Gatekeeper entirely — a file written by git
+  carries no `com.apple.quarantine` attribute, a downloaded one does. Verified 2026-08-07: a
+  quarantined `.command` is refused by LaunchServices with `userCanceledErr` and never runs, while
+  the same file cloned runs on a double-click.
+- **Whatever was posted while nobody was hosting is dropped**, not replayed — `run_polling` is
+  called with `drop_pending_updates=True`. Telegram holds updates for ~24 h and a handover always
+  follows a gap, so the default would dump the whole gap into the group at once. Measured with
+  nobody running: 7 updates queued, 2 of them reels. The cost is that a link posted while the bot
+  was off never arrives.
+
+The owner's workflow is `docs/updating.md`. Nothing else here changes: `python bot.py` above is
+still the way the owner runs it, and the launcher is a convenience wrapped around exactly that.
 
 ### Self-check
 
@@ -250,6 +282,29 @@ handling of mixed photo/video ones is an open upstream problem (yt-dlp #7569, #1
 carousel was available to measure, so a multi-entry info dict returns `False` and the group gets the
 apology. The single-image reference post reports `entries: 0`, so nothing measured is affected.
 
+### 4.9 One poller per token
+
+Telegram allows exactly one `getUpdates` poller per token, and this is the constraint the whole
+baton pass is built around. Measured 2026-08-07:
+
+| What was done | What happened |
+|---|---|
+| two concurrent `getUpdates` on one token | **both** got HTTP **409**, `Conflict: terminated by other getUpdates request; make sure that only one bot instance is running` |
+| one competing `getUpdates` against the running bot | the bot **did not exit**; it kept retrying and logged **6 conflict lines and 3 tracebacks in ten seconds** |
+
+The second row is why `on_error` exists: that wall of text was unreadable to the friend whose window
+it was, for an event that is completely normal here. It is also why a conflict is *tolerated* rather
+than fatal — the launcher's own "is anybody running?" probe is a competing `getUpdates` call by
+construction, so merely asking costs the running instance one conflict. Exiting on the first one
+would turn the question into a remote kill switch. `CONFLICT_GRACE` (60 s) is six times the measured
+blip; `CONFLICT_EPISODE_GAP` (45 s) is above python-telegram-bot's own retry backoff, which grows
+1.5× per failure and is **capped at 30 s** (`telegram/ext/_utils/networkloop.py`).
+
+Not verified without a second live instance: that python-telegram-bot delivers the `Conflict` to the
+registered error handler at all. The path is asserted from `conflict_action` up to `on_error`, and
+the library's own code says it does (`Application.run_polling` passes an `error_callback` that feeds
+`process_error`), but nobody has watched it happen.
+
 ---
 
 ## 5. Operations — what actually breaks
@@ -274,6 +329,10 @@ their pages without warning, and that is this project's real failure mode.
    escape hatch is `--js-runtimes node` or installing `deno`.
 5. **A video arrives as a grey file row instead of playing** → the format string picked AV1 or a
    webm. §4.1 and §4.2. The self-check catches this; run it.
+6. **The log says `another instance has taken the poll`** → somebody else opened a launcher. One
+   line means somebody merely *asked* whether the bot was running and this instance recovered;
+   `the conflict lasted 60 s` means the handover was real and this instance stopped on purpose.
+   §2.1 and §4.9.
 
 ---
 
@@ -286,6 +345,9 @@ a preference.
 |---|---|
 | Database, job queue, web framework, Docker | 20 links a week. Cost with no benefit. |
 | `systemd` unit, `launchd` plist, any process manager | Belongs to the port onto the spare Linux machine, not here. Adding it now ties the repo to macOS. |
+| Auto-start for the launcher — a LaunchAgent, a Startup shortcut | The baton pass is manual on purpose. Two friends who each installed one would quietly re-create the 409 problem every morning, with nobody at the keyboard to answer the question the launcher asks. |
+| A cross-platform launcher, a Python bootstrapper, a shared config for the two scripts | Two ~100-line scripts that each read plainly in their own idiom beat one clever thing neither platform's user can debug. |
+| A lock file to answer "is anybody hosting?" | It would live on the wrong machine and go stale. Telegram's own 409 is the only authority, and asking costs one conflict (§4.9). |
 | A JS runtime (`deno`, wiring `node`) | Extraction works without one today, measured. The port target argues against a new runtime dependency added to silence a warning. |
 | A local Telegram Bot API server for 2 GB uploads | Compiling tdlib for a ceiling meme-length clips rarely reach. |
 | TikTok support | Not requested, and the IP was blocked when it was probed. |
@@ -300,14 +362,18 @@ a preference.
 
 ```
 bot.py                    the whole application, plus its self-check
+run-bot.command           the macOS launcher. Committed 100755 or it does not double-click.
+run-bot.cmd               the Windows launcher. Untested on real Windows.
 requirements.txt          pinned: yt-dlp[default,curl-cffi]==2026.7.4, python-telegram-bot==22.8
 README.md                 this file
+EMPEZAR-ACA.md            the friend-facing quickstart, in Spanish. Product copy, not docs.
 AGENTS.md                 the rules an agent must not violate, plus routing
+docs/updating.md          how the owner ships a change and how a new friend gets set up
 docs/history.md           how the project got here: measurements, killed premises, decisions
 docs/RUN-STATE.md         the full run log of the 2026-08-07 build session
 docs/archive/             the original plan and prompt-order, superseded, kept for provenance
 .env                      the token. gitignored. never commit it.
-.venv/                    gitignored
+.venv/                    gitignored, and it also holds the launcher's dependency stamp
 ```
 
 Nothing in this repo is generated. Everything tracked is either the application, its pins, or a

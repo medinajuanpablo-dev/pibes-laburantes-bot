@@ -10,6 +10,9 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | You need… | Go to |
 |---|---|
 | what it does, how to run it, the architecture | `README.md` §1–§2 |
+| the launchers, the baton pass, one-poller-per-token | `README.md` §2.1 and §4.9 |
+| how the owner ships a change, bumps a pin, sets up a new host | `docs/updating.md` |
+| what a friend hosting the bot is told (Spanish, product copy) | `EMPEZAR-ACA.md` |
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
 | what breaks in production and how to diagnose it | `README.md` §5 |
@@ -21,8 +24,9 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 
 1. **One file until it hurts.** No `src/`, no packages, no class hierarchy, no plugin registry, no
    dependency injection. A second file needs its reason in the commit message.
-2. **Nothing OS-specific, anywhere.** This gets copied onto an old Linux box. No `/opt/homebrew`
-   paths, no `launchd`, no Homebrew assumptions. Resolve ffmpeg from `PATH`.
+2. **Nothing OS-specific in `bot.py`.** It gets copied onto an old Linux box. No `/opt/homebrew`
+   paths, no `launchd`, no Homebrew assumptions. Resolve ffmpeg from `PATH`. The two launchers are
+   the only OS-specific files here, that is what they are for, and none of it may leak inwards.
 3. **No database, no job queue, no web framework, no Docker, no process manager.** At this volume
    they are cost with no benefit. `systemd` belongs to the port, not here.
 4. **Secrets never enter git.** The token is `TELEGRAM_BOT_TOKEN` from the environment, kept in a
@@ -56,6 +60,19 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `raise_no_formats(info, forced=True)` and the forced arm raises whatever the flag says. It works
   only with `download=False`, which is why the image fallback probes separately instead of folding
   the flag into `_ydl_options` (`README.md` §4.8).
+- **Telegram allows exactly one poller per token, and a conflict here is normal, not a bug.** Two
+  pollers both get HTTP 409; the losing bot does not exit, it retries. The launcher's "is anybody
+  running?" probe is itself a competing `getUpdates`, so *asking* costs the running instance one
+  conflict — which is why `on_error` announces a conflict but only gives up on one that lasts
+  `CONFLICT_GRACE`. Exiting on the first one would make the question a remote kill switch, and
+  `CONFLICT_EPISODE_GAP` must stay above python-telegram-bot's retry backoff, capped at 30 s.
+  Numbers and method: `README.md` §4.9.
+- **`drop_pending_updates=True` is a decision, not a default.** Telegram holds updates ~24 h and
+  every handover follows a gap in which nobody hosted, so replaying the queue dumps the whole gap
+  into the group at once. The accepted cost is that a link posted while the bot was off is lost.
+- **A file written by `git` carries no `com.apple.quarantine`; a downloaded one does.** That is the
+  entire reason distribution is `git clone` rather than a zip: a quarantined `.command` is refused
+  by LaunchServices and never runs. It is also why the launcher can update itself.
 - **An image post's thumbnails carry no dimensions, and the list is not sorted worst-to-best.** A
   reel's thumbnails *do* carry width/height, which makes the wrong assumption easy. Selection is by
   downloaded file size for that reason. Also: `duration` and `title` discriminate image from video
@@ -74,7 +91,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   the apology left unprotected · `MESSAGE_FILTER` → `filters.TEXT | filters.CAPTION` ·
   `delivery_decision` `<=` → `<` · the ignore-logging dropping its rejected URLs or leaking the body ·
   `is_image_post` dropping its `formats` or carousel guard · the thumbnail chosen by list order
-  rather than by size.
+  rather than by size · `main` not registering `on_error` · the conflict handler's `quiet` branch ·
+  `CONFLICT_GRACE` set to 0 (a probe would then kill a healthy bot) · the episode reset in
+  `conflict_action` · the Spanish line the person at the window reads ·
+  `run_polling` losing `drop_pending_updates`.
 - **The self-check really downloads four times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook. That is deliberate: extraction rotting is this project's actual failure mode and
   only a real download detects it. Keep the clips short, and when you change one, verify the codec
@@ -96,6 +116,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `False`, so the group gets the apology. yt-dlp models carousels as playlists and its mixed
   photo/video handling is an open upstream problem (#7569, #11792); no public carousel was available
   to measure. Upgrade path: find one, measure the entries, then decide first-slide vs all.
+- **Nobody has watched python-telegram-bot hand a `Conflict` to `on_error`.** The rule and the
+  handler are asserted, and the library's own code routes polling errors to `process_error`, but
+  the end-to-end path needs two live instances on the real token.
+- **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked.
+  Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to watch.
 - **`pool_timeout` is left at its 1.0 s default.** It governs contention for a 256-connection pool
   that a sequential bot never contends for.
 - **PTB processes updates sequentially**, so a slow upload blocks the handler for its duration. The
