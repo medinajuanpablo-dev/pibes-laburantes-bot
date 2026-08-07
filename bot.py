@@ -58,9 +58,11 @@ TELEGRAM_MAX_PHOTO_UPLOAD = 10 * 1024 * 1024
 # picks AV1+Opus at ~21 MB instead of H.264's ~29 MB. The extra 9 MB buys a clip that
 # plays; the ceiling is 50 MB, so there is room to pay it.
 #
-# ponytail: 720p cap, raise it if the group complains about quality. `height<=1080`
-# measured 1920x1080 / ~34 MB on the same YouTube video -- still under the ceiling,
-# so the cap is a taste call, not a technical one.
+# ponytail: 720p cap. Raising it is NOT free at this codec preference: the same
+# YouTube video at `height<=1080` measures 1920x1080 H.264 at ~84 MB, over the 50 MB
+# ceiling, where the AV1 equivalent is ~34 MB. So 1080p would mean either accepting
+# AV1's playability risk or having long clips fall through to the link fallback.
+# Leave it at 720 unless the group actually complains.
 # ponytail: the height cap is NOT a size guarantee. Branch 2 accepts unknown heights
 # by design, and portrait video (the Facebook clip is 720x900) can exceed 720 in the
 # long dimension while passing a `height<=720` filter or skipping it entirely. The
