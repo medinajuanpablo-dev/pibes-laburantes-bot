@@ -515,8 +515,15 @@ def main() -> None:
 
 # One known-good public URL per site. These hit the network on purpose: extraction
 # rotting is this project's real failure mode, and only a real download detects it.
+#
+# Deliberately short clips. The YouTube entry is a 19-second video, not the
+# 3.5-minute one the format string was measured against, because the check does not
+# need 30 MB to prove anything: verified on 2026-08-07 that the codec-agnostic
+# mutation of MEDIA_FORMAT still selects AV1 on this clip, so the assertion that
+# matters stays armed while the run drops from minutes to seconds. The large-file
+# path is covered by plain numbers through delivery_decision instead.
 SELF_CHECK_URLS = {
-    "youtube": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "youtube": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
     "instagram": "https://www.instagram.com/reel/DbGNFqVKnB-/?igsh=OHFxM3dxdmIzdTQ5",
     "facebook": "https://www.facebook.com/share/v/1L8yZSLkWq/",
 }
@@ -594,6 +601,10 @@ def _check_pure_helpers() -> None:
     assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD, "photo") == "file"
     assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD + 1, "photo") == "link", "photos cap lower"
     assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD + 1, "video") == "file", "videos do not"
+    # The large-file path, by number rather than by downloading 30 MB every run.
+    # 29,969,207 B is the real measured size of a 3.5-minute 720p YouTube video.
+    assert delivery_decision(29_969_207, "video") == "file", "a 3.5-min 720p video must fit"
+    assert delivery_decision(29_969_207, "photo") == "link", "the same bytes as a photo must not"
     print("ok  delivery_decision")
 
     # telegram_renders_inline, against the four real uploads it encodes.

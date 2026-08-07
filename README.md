@@ -24,7 +24,8 @@ The token comes from [@BotFather](https://t.me/BotFather) and lives only in your
 It is never written to a file in this repo. Keep it in a gitignored `.env` you source yourself if
 you like typing less.
 
-Self-check (no network for the pure helpers, one real YouTube download for the extraction test):
+Self-check — the pure helpers run offline, then it really downloads one short clip from each of the
+three sites and asserts with `ffprobe` that what came back is something Telegram plays inline:
 
 ```sh
 .venv/bin/python bot.py --self-check
