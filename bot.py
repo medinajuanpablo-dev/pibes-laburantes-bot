@@ -11,10 +11,12 @@ Run it with `python bot.py`; run its self-check with `python bot.py --self-check
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -351,6 +353,28 @@ def delivery_decision(size_bytes: int, kind: str) -> str:
     return "file" if size_bytes <= upload_ceiling(kind) else "link"
 
 
+def telegram_renders_inline(container: str, video_codec: str) -> bool:
+    """Whether Telegram shows this file as a playable video or as a grey file row.
+
+    Both arguments are ffprobe's own strings: `format.format_name` (a comma-separated
+    list like "mov,mp4,m4a,3gp,3g2,mj2" or "matroska,webm") and a video stream's
+    `codec_name` ("h264", "vp9", "av1").
+
+    Measured against a live group on 2026-08-07, four real uploads:
+
+        h264 + aac,  mp4   -> video
+        vp9  + aac,  mp4   -> video
+        h264 + aac,  mp4   -> video   (28.58 MB, the merged YouTube case)
+        av01 + opus, webm  -> DOCUMENT
+
+    So the rule is NOT "h264 only" -- vp9 in an mp4 played inline. What fails is
+    webm/AV1. This is the property the whole format string exists to guarantee, and
+    the self-check asserts it on every real download.
+    """
+    containers = {name.strip().lower() for name in container.split(",")}
+    return "mp4" in containers and "av1" not in video_codec.lower()
+
+
 def oversize_reply(size_bytes: int, link: str) -> str:
     """The Spanish message sent instead of a file that will not fit."""
     megabytes = size_bytes / 1024 / 1024
@@ -500,11 +524,42 @@ def _check_pure_helpers() -> None:
     assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD + 1, "video") == "file", "videos do not"
     print("ok  delivery_decision")
 
+    # telegram_renders_inline, against the four real uploads it encodes.
+    assert telegram_renders_inline("mov,mp4,m4a,3gp,3g2,mj2", "h264")
+    assert telegram_renders_inline("mov,mp4,m4a,3gp,3g2,mj2", "vp9"), "vp9 in mp4 played inline"
+    assert not telegram_renders_inline("matroska,webm", "av1"), "webm/av1 arrived as a document"
+    assert not telegram_renders_inline("mov,mp4,m4a,3gp,3g2,mj2", "av1"), "av1 is out either way"
+    assert not telegram_renders_inline("matroska,webm", "h264"), "webm is out either way"
+    print("ok  telegram_renders_inline")
+
     message = oversize_reply(120 * 1024 * 1024, "https://youtu.be/abc")
     assert "https://youtu.be/abc" in message, "the fallback must carry the link"
     assert "120 MB" in message, message
     assert "Traceback" not in message
     print("ok  oversize_reply")
+
+
+def _probe_container_and_codec(path: Path) -> tuple[str, str]:
+    """Ask ffprobe what the file on disk really is: (container, video codec name).
+
+    ffprobe, not the info dict. The point of this check is to catch a format string
+    that yt-dlp is perfectly happy with and Telegram is not.
+    """
+    ffprobe = shutil.which("ffprobe")
+    assert ffprobe, "ffprobe not found on PATH (it ships with ffmpeg)"
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-of", "json",
+         "-show_entries", "format=format_name:stream=codec_type,codec_name", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    probed = json.loads(result.stdout)
+    container = probed["format"]["format_name"]
+    video = [s for s in probed["streams"] if s.get("codec_type") == "video"]
+    assert video, f"{path.name}: ffprobe found no video stream"
+    return container, video[0].get("codec_name", "")
 
 
 def _check_extraction() -> None:
@@ -521,7 +576,19 @@ def _check_extraction() -> None:
             assert delivery_decision(size, kind) == "file", (
                 f"{site}: {size} bytes is over the {upload_ceiling(kind)}-byte ceiling for {kind}"
             )
-            print(f"ok  {site}: {media.path.name} {size} bytes -> {reply_method_name(kind)}")
+
+            # The property the whole design rests on. Without this the check passes
+            # for a file Telegram delivers as a grey file row instead of a video.
+            container, codec = _probe_container_and_codec(media.path)
+            assert telegram_renders_inline(container, codec), (
+                f"{site}: got {container} / {codec}, which Telegram delivers as a DOCUMENT, "
+                f"not a video. Check MEDIA_FORMAT."
+            )
+
+            print(
+                f"ok  {site}: {media.path.name} {size} bytes, {container.split(',')[0]}/{codec}"
+                f" -> {reply_method_name(kind)}"
+            )
             workspace = media.path.parent
         assert not workspace.exists(), f"{site}: temp dir {workspace} survived the context manager"
     print("ok  temp directories cleaned up")
