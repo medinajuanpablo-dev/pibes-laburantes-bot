@@ -131,6 +131,9 @@ class Media(NamedTuple):
     path: Path
     has_audio: bool
     direct_url: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration: float | None = None
 
 
 def read_token() -> str:
@@ -223,7 +226,15 @@ def download_into(url: str, target_dir: Path) -> Media:
         raise ExtractionError(f"yt-dlp reported success but left no file for {url}")
     if path.stat().st_size == 0:
         raise ExtractionError(f"yt-dlp left an empty file for {url}")
-    return Media(path=path, has_audio=_has_audio(info), direct_url=_direct_url(info))
+    width, height, duration = _dimensions(info)
+    return Media(
+        path=path,
+        has_audio=_has_audio(info),
+        direct_url=_direct_url(info),
+        width=width,
+        height=height,
+        duration=duration,
+    )
 
 
 @contextmanager
@@ -249,6 +260,31 @@ def _has_audio(info: dict | None) -> bool:
     entries = info.get("requested_downloads") or []
     acodec = entries[0].get("acodec") if entries else info.get("acodec")
     return acodec != "none"
+
+
+def _dimensions(info: dict | None) -> tuple[int | None, int | None, float | None]:
+    """Width, height and duration of the file that was actually written.
+
+    Width and height come from `requested_downloads[0]`, the entry that describes the
+    file on disk, rather than from the top of the info dict, which describes whatever
+    yt-dlp last selected. Measured on 2026-08-07 the two agree everywhere they are
+    populated (YouTube 1280x720 in both; Instagram and Facebook null in both under
+    this format string), so this is a correct-by-construction preference, not a fix
+    for an observed mismatch -- do not go looking for the bug it prevents.
+
+    Duration is a property of the video rather than of the format, so falling back to
+    the top level is both safe and necessary: YouTube and Facebook report it only
+    there.
+
+    Any of the three may be None. Instagram reports all three as unknown and Facebook
+    reports only duration, so the caller must omit rather than substitute.
+    """
+    if not info:
+        return None, None, None
+    entry = (info.get("requested_downloads") or [{}])[0]
+    width, height = entry.get("width"), entry.get("height")
+    duration = entry.get("duration") or info.get("duration")
+    return width, height, duration
 
 
 def _direct_url(info: dict | None) -> str | None:
@@ -353,6 +389,24 @@ def delivery_decision(size_bytes: int, kind: str) -> str:
     return "file" if size_bytes <= upload_ceiling(kind) else "link"
 
 
+def video_kwargs(media: Media) -> dict:
+    """Extra arguments for reply_video, omitting anything the extractor did not report.
+
+    Without width/height/duration Telegram guesses, and it guesses badly: the same
+    28.58 MB file came back as 320x320 / duration 0 without them and as 1280x720 /
+    213 s with them (measured live, 2026-08-07). Never send zeros -- Instagram and
+    Facebook report these fields as unknown, and a zero is a lie where an absent
+    field is an honest "you work it out".
+    """
+    kwargs: dict = {"supports_streaming": True}
+    if media.width and media.height:
+        kwargs["width"] = int(media.width)
+        kwargs["height"] = int(media.height)
+    if media.duration:
+        kwargs["duration"] = round(media.duration)
+    return kwargs
+
+
 def telegram_renders_inline(container: str, video_codec: str) -> bool:
     """Whether Telegram shows this file as a playable video or as a grey file row.
 
@@ -422,7 +476,7 @@ async def _deliver(message: telegram.Message, url: str) -> None:
 
 async def _send(message: telegram.Message, kind: str, media: Media) -> None:
     reply = getattr(message, reply_method_name(kind))
-    extra = {"supports_streaming": True} if kind == "video" else {}
+    extra = video_kwargs(media) if kind == "video" else {}
     await reply(media.path, write_timeout=UPLOAD_TIMEOUT, read_timeout=UPLOAD_TIMEOUT, **extra)
 
 
@@ -532,6 +586,18 @@ def _check_pure_helpers() -> None:
     assert not telegram_renders_inline("matroska,webm", "h264"), "webm is out either way"
     print("ok  telegram_renders_inline")
 
+    # video_kwargs: real numbers pass through, unknowns are omitted, never zeros.
+    stub = Path("x.mp4")
+    full = video_kwargs(Media(stub, True, None, 1280, 720, 213.0))
+    assert full == {"supports_streaming": True, "width": 1280, "height": 720, "duration": 213}, full
+    bare = video_kwargs(Media(stub, True))
+    assert bare == {"supports_streaming": True}, f"unknown dimensions must be omitted: {bare}"
+    assert "width" not in video_kwargs(Media(stub, True, None, 0, 0, 0)), "never send zeros"
+    assert "duration" not in video_kwargs(Media(stub, True, None, 0, 0, 0)), "never send zeros"
+    assert "width" not in video_kwargs(Media(stub, True, None, 1280, None, None)), "half is nothing"
+    assert video_kwargs(Media(stub, True, None, None, None, 29.7))["duration"] == 30, "rounded int"
+    print("ok  video_kwargs")
+
     message = oversize_reply(120 * 1024 * 1024, "https://youtu.be/abc")
     assert "https://youtu.be/abc" in message, "the fallback must carry the link"
     assert "120 MB" in message, message
@@ -585,9 +651,10 @@ def _check_extraction() -> None:
                 f"not a video. Check MEDIA_FORMAT."
             )
 
+            extra = video_kwargs(media)
             print(
                 f"ok  {site}: {media.path.name} {size} bytes, {container.split(',')[0]}/{codec}"
-                f" -> {reply_method_name(kind)}"
+                f" -> {reply_method_name(kind)} {extra}"
             )
             workspace = media.path.parent
         assert not workspace.exists(), f"{site}: temp dir {workspace} survived the context manager"
