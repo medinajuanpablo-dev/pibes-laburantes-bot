@@ -100,6 +100,23 @@ SOCKET_TIMEOUT = 20  # seconds. Note: timeout(1) does not exist on macOS; this i
 # holding the whole file in RAM).
 UPLOAD_TIMEOUT = 600  # seconds
 
+# Establishing the connection is a separate timeout from transferring over it, and
+# python-telegram-bot defaults it to 5 s. Passing write_timeout and read_timeout does
+# not touch it, so a generous upload timeout is worth nothing when the TCP+TLS
+# handshake is the thing that gives up.
+#
+# ponytail: 30 s, sized for a bad mobile connection rather than measured -- the only
+# evidence is failures. Measured on a live group: a 1,272,833-byte Instagram reel
+# failed twice, three minutes apart, each time ~5 s after the upload began, with
+# telegram.error.TimedOut -- exactly what an httpx.ConnectTimeout surfaces as, and
+# exactly PTB's 5 s default. Other reels of the same size and a 17.6 MB video
+# succeeded in the same session, so this is a flaky handshake, not a slow transfer.
+# Raise it if TimedOut recurs at 30 s.
+CONNECT_TIMEOUT = 30  # seconds
+
+# Short text replies carry no upload, so a minute is already generous.
+TEXT_REPLY_TIMEOUT = 60  # seconds
+
 # The three sites the group actually pastes. Anything else is left alone rather than
 # attempted and apologised for -- a bot that answers "no pude bajar ese link" to every
 # news article in the chat is worse than one that stays quiet.
@@ -503,7 +520,13 @@ async def _deliver(message: telegram.Message, url: str) -> None:
 async def _send(message: telegram.Message, kind: str, media: Media) -> None:
     reply = getattr(message, reply_method_name(kind))
     extra = video_kwargs(media) if kind == "video" else {}
-    await reply(media.path, write_timeout=UPLOAD_TIMEOUT, read_timeout=UPLOAD_TIMEOUT, **extra)
+    await reply(
+        media.path,
+        connect_timeout=CONNECT_TIMEOUT,
+        write_timeout=UPLOAD_TIMEOUT,
+        read_timeout=UPLOAD_TIMEOUT,
+        **extra,
+    )
 
 
 def main() -> None:
