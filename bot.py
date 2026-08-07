@@ -490,12 +490,35 @@ async def on_start(update: telegram.Update, _context: object) -> None:
 
 
 async def on_message(update: telegram.Update, _context: object) -> None:
+    """Deliver every supported link in a message, and say why when there are none.
+
+    Doing nothing is a legitimate outcome here -- most messages in the group are not
+    links -- but an untraceable one is not. When a link is pasted and no video comes
+    back, the log has to be able to tell the owner whether no URL was recognised at
+    all or the URLs were recognised and rejected as unsupported hosts. Those two have
+    different fixes and there is no way to tell them apart from the chat.
+
+    The rejected URLs go in the log because they are the entire diagnosis. The
+    message body does not: this is a private group.
+    """
     message = update.effective_message
     if message is None:
         return
-    for url in find_urls(message.text or message.caption):
-        if is_supported(url):
-            await _deliver(message, url)
+    urls = find_urls(message.text or message.caption)
+    if not urls:
+        log.info("message %s: no URL recognised, nothing to do", message.message_id)
+        return
+    supported = [url for url in urls if is_supported(url)]
+    if not supported:
+        log.info(
+            "message %s: %d URL(s) found, none on a supported host -- rejected: %s",
+            message.message_id,
+            len(urls),
+            ", ".join(urls),
+        )
+        return
+    for url in supported:
+        await _deliver(message, url)
 
 
 async def _deliver(message: telegram.Message, url: str) -> None:
@@ -801,6 +824,63 @@ def _check_send_timeouts() -> None:
     print("ok  outbound calls carry an explicit connect_timeout")
 
 
+@contextmanager
+def _capture_log(level: int) -> Iterator[list[str]]:
+    """Collect this module's log messages at `level` or above, and keep them off stderr.
+
+    Raises the logger's own level for the duration: the self-check configures logging
+    at WARNING, so an INFO record would be dropped before any handler saw it.
+    """
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Collect(level)
+    previous_level, previous_propagate = log.level, log.propagate
+    log.addHandler(handler)
+    log.setLevel(level)
+    log.propagate = False
+    try:
+        yield messages
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(previous_level)
+        log.propagate = previous_propagate
+
+
+def _check_message_logging() -> None:
+    """A message that produces no video must say why in the log."""
+
+    def deliver_nothing(text: str) -> list[str]:
+        message = telegram.Message(
+            message_id=7,
+            date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
+            chat=telegram.Chat(id=-100, type=telegram.Chat.GROUP),
+            from_user=telegram.User(id=1, first_name="u", is_bot=False),
+            text=text,
+        )
+        with _capture_log(logging.INFO) as messages:
+            asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
+        return messages
+
+    no_url = deliver_nothing("che alguien vio el partido ayer")
+    assert len(no_url) == 1, f"exactly one line, got {no_url}"
+    assert "no URL recognised" in no_url[0], no_url
+    assert "partido" not in no_url[0], f"do not log the message body: {no_url}"
+
+    rejected = deliver_nothing("miren https://example.com/nota y https://www.tiktok.com/@a/video/1")
+    assert len(rejected) == 1, f"exactly one line, got {rejected}"
+    # The rejected URLs are the whole diagnosis -- without them the line is useless.
+    assert "https://example.com/nota" in rejected[0], rejected
+    assert "https://www.tiktok.com/@a/video/1" in rejected[0], rejected
+    assert "2 URL(s)" in rejected[0], rejected
+    # The message body is not the diagnosis, and this is a private group.
+    assert "miren" not in rejected[0], f"do not log the message body: {rejected}"
+    print("ok  on_message logs why it delivered nothing")
+
+
 def _check_failure_path() -> None:
     """_deliver must survive a download AND a reply that both blow up.
 
@@ -816,39 +896,26 @@ def _check_failure_path() -> None:
             self.attempts += 1
             raise telegram.error.TimedOut
 
-    class Captured(logging.Handler):
-        def __init__(self) -> None:
-            super().__init__()
-            self.errors: list[str] = []
-
-        def emit(self, record: logging.LogRecord) -> None:
-            if record.levelno >= logging.ERROR:
-                self.errors.append(record.getMessage())
-
     def _exploding_download(_url: str, _target_dir: Path) -> Media:
         raise ExtractionError("simulated extractor failure")
 
-    captured = Captured()
-    log.addHandler(captured)
     real_download = globals()["download_into"]
     globals()["download_into"] = _exploding_download
-    # Both failures are deliberate here, so keep their tracebacks out of the
-    # self-check's output -- they are asserted on below, not ignored.
-    log.propagate = False
     try:
         message = ExplodingMessage()
-        # If this raises, _deliver's except block is not a net and the group gets
-        # nothing -- the exact live failure this guards against.
-        asyncio.run(_deliver(message, "https://youtu.be/never-fetched"))
+        # Both failures here are deliberate, so _capture_log also keeps their
+        # tracebacks out of the self-check's output -- asserted on below, not ignored.
+        with _capture_log(logging.ERROR) as errors:
+            # If this raises, _deliver's except block is not a net and the group gets
+            # nothing -- the exact live failure this guards against.
+            asyncio.run(_deliver(message, "https://youtu.be/never-fetched"))
     finally:
-        log.propagate = True
         globals()["download_into"] = real_download
-        log.removeHandler(captured)
 
     assert message.attempts == 1, f"the apology must be attempted exactly once, got {message.attempts}"
-    assert len(captured.errors) == 2, f"both failures must be logged, got {captured.errors}"
-    assert any("failed to deliver" in m for m in captured.errors), captured.errors
-    assert any("got nothing" in m for m in captured.errors), captured.errors
+    assert len(errors) == 2, f"both failures must be logged, got {errors}"
+    assert any("failed to deliver" in m for m in errors), errors
+    assert any("got nothing" in m for m in errors), errors
     print("ok  _deliver swallows a failing download AND a failing apology")
 
 
@@ -856,6 +923,7 @@ def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
     _check_send_timeouts()
+    _check_message_logging()
     _check_failure_path()
     _check_extraction()
     print("\nself-check passed")
