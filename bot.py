@@ -78,8 +78,26 @@ MEDIA_FORMAT = (
 
 SOCKET_TIMEOUT = 20  # seconds. Note: timeout(1) does not exist on macOS; this is the real knob.
 
-# A 30 MB upload will not finish inside python-telegram-bot's 20-second default.
-UPLOAD_TIMEOUT = 300  # seconds
+# python-telegram-bot's default media write timeout is 20 s, which no real video
+# meets. This value has to cover a whole upload, not one socket write: PTB reads the
+# file into `bytes` (telegram/_files/inputfile.py), httpx yields a bytes body as a
+# single chunk (httpx/_multipart.py FileField.render_data), and httpcore applies the
+# write timeout per chunk -- so for this code path one chunk is the entire file and
+# the write timeout is an effective whole-upload deadline. Verified by reading those
+# three sources on 2026-08-07, because the per-chunk reading of the same code would
+# have made this constant harmless and the fix unnecessary.
+#
+# Measured: two real uploads of the same 29,969,207-byte file took 216 s and 128 s,
+# i.e. a slow-day rate of ~139 kB/s. The 50 MiB ceiling needs ~378 s at that rate, so
+# the previous 300 s promised a size the code could not deliver and failed as a bare
+# "no pude bajar ese link". 600 s covers the full ceiling down to ~87 kB/s.
+#
+# ponytail: 600 s of a blocked handler is the cost, since Application processes
+# updates sequentially by default. Fine at 20 links a week. If it ever bites, the
+# upgrade path is handing PTB an open file object instead of a Path -- httpx then
+# streams at 64 KiB and this stops being a whole-upload deadline (it also stops
+# holding the whole file in RAM).
+UPLOAD_TIMEOUT = 600  # seconds
 
 # The three sites the group actually pastes. Anything else is left alone rather than
 # attempted and apologised for -- a bot that answers "no pude bajar ese link" to every
