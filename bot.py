@@ -10,16 +10,22 @@ Run it with `python bot.py`; run its self-check with `python bot.py --self-check
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
+from urllib.parse import urlparse
 
+import telegram
 import yt_dlp
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 log = logging.getLogger("the-bot")
 
@@ -32,29 +38,94 @@ COOKIES_ENV_VAR = "YTDLP_COOKIES"
 TELEGRAM_MAX_UPLOAD = 50 * 1024 * 1024
 TELEGRAM_MAX_PHOTO_UPLOAD = 10 * 1024 * 1024
 
-# Prefer merged 720p H.264 + AAC (separate streams joined by ffmpeg), then merged
-# 720p in any codec, then a single-file 720p-or-below, then whatever exists.
+# Format preference, ordered for *inline playability first, bytes second*. Telegram
+# renders H.264/AAC in an mp4 as a real video; anything else risks arriving as a grey
+# file row, which defeats the purpose of the bot.
 #
-# The codec preference is deliberate and costs bytes. Measured on 2026-08-07 for a
-# 3.5-minute YouTube video: plain `bv*[height<=720]+ba` picks AV1 + Opus at ~20 MB,
-# the avc1/mp4a pair is ~28.5 MB. Both are far under the ceiling, and H.264/AAC in
-# an mp4 is what every Telegram client plays inline -- which is the whole point of
-# this bot. Size is the cheap resource here; a clip that arrives as an unplayable
-# blob is a failure.
+#   1. A ≤720p H.264 video stream merged with an AAC audio stream. YouTube's case.
+#   2. A ready-made single-file mp4 the site serves itself. Instagram and Facebook
+#      both expose one, with every field ("height", "vcodec") reported as unknown --
+#      hence `height<=?720`, where the `?` lets an unknown height through. No ffmpeg
+#      merge is needed for these.
+#   3. Any ≤720p merge, 4. anything at all. Safety nets, never hit by the three sites.
 #
-# ponytail: 720p cap, raise it if the group complains about quality. There is
-# headroom: 28.5 MB against a 50 MB ceiling.
+# Measured on 2026-08-07, all three anonymous, no cookies, downloaded and ffprobed:
+#   YouTube  dQw4w9WgXcQ  -> 136+140  1280x720 h264/aac  29,969,207 B  (ffmpeg merge)
+#   Instagram reel        -> 3        772x720  h264/aac   1,272,833 B  (no merge)
+#   Facebook reel         -> hd       720x900  h264/aac   1,881,291 B  (no merge)
+#
+# Note branch 1 is what costs bytes on YouTube: the codec-agnostic `bv*[height<=720]+ba`
+# picks AV1+Opus at ~21 MB instead of H.264's ~29 MB. The extra 9 MB buys a clip that
+# plays; the ceiling is 50 MB, so there is room to pay it.
+#
+# ponytail: 720p cap, raise it if the group complains about quality. `height<=1080`
+# measured 1920x1080 / ~34 MB on the same YouTube video -- still under the ceiling,
+# so the cap is a taste call, not a technical one.
+# ponytail: the height cap is NOT a size guarantee. Branch 2 accepts unknown heights
+# by design, and portrait video (the Facebook clip is 720x900) can exceed 720 in the
+# long dimension while passing a `height<=720` filter or skipping it entirely. The
+# only real size guard is the byte count of the finished file -- see fits_in_telegram.
 MEDIA_FORMAT = (
     "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/"
+    "b[ext=mp4][height<=?720]/"
     "bv*[height<=720]+ba/"
-    "b[height<=720]/b"
+    "b/bv*+ba"
 )
 
 SOCKET_TIMEOUT = 20  # seconds. Note: timeout(1) does not exist on macOS; this is the real knob.
 
+# A 30 MB upload will not finish inside python-telegram-bot's 20-second default.
+UPLOAD_TIMEOUT = 300  # seconds
+
+# The three sites the group actually pastes. Anything else is left alone rather than
+# attempted and apologised for -- a bot that answers "no pude bajar ese link" to every
+# news article in the chat is worse than one that stays quiet.
+# ponytail: hardcoded host list; add a host here when the group starts pasting a
+# fourth site. Not worth a config file at 20 links a week.
+SUPPORTED_HOSTS = frozenset(
+    {
+        "youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "instagram.com",
+        "instagr.am",
+        "facebook.com",
+        "fb.watch",
+        "fb.com",
+    }
+)
+
+# Only scheme-carrying URLs count. A bare "instagram.com" mentioned mid-sentence is
+# someone talking about a site, not a link to fetch.
+# ponytail: this misses schemeless pastes like "youtu.be/xyz" that Telegram itself
+# renders as links. Upgrade path if that turns out to annoy the group: read
+# message.entities instead of the raw text and let Telegram decide what a link is.
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'()\[\]]+", re.IGNORECASE)
+
+# Trailing punctuation a human types after a pasted link: "mira esto https://x.com/y."
+URL_TRAILING_JUNK = ".,;:!?'\"»)]}"
+
+PHOTO_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".heic", ".bmp"})
+ANIMATION_SUFFIXES = frozenset({".gif"})
+
+# Media kind -> the python-telegram-bot Message method that renders it inline.
+# reply_document is deliberately absent: a document shows up as a grey file row.
+REPLY_METHODS = {
+    "video": "reply_video",
+    "photo": "reply_photo",
+    "animation": "reply_animation",
+}
+
+FAILURE_REPLY = "no pude bajar ese link"
+
 
 class ExtractionError(Exception):
     """The media could not be downloaded. The message is for the log, not the group."""
+
+
+class Media(NamedTuple):
+    path: Path
+    has_audio: bool
 
 
 def read_token() -> str:
@@ -120,32 +191,59 @@ def _ydl_options(target_dir: Path) -> dict:
 
 
 @contextmanager
-def downloaded_media(url: str) -> Iterator[Path]:
-    """Download `url` into a temp dir and yield the resulting file's path.
-
-    Nothing in here knows about Telegram. The temp directory is removed on the way
-    out whether the download succeeded, failed, or the caller raised -- which is why
-    this is a context manager and not a plain function returning a path: the caller
-    needs the file to still exist while it uses it.
-
-    Raises ExtractionError if the download produced no usable file.
-    """
+def temp_workspace() -> Iterator[Path]:
+    """A scratch directory that is removed on the way out, success or failure."""
     target_dir = Path(tempfile.mkdtemp(prefix="the-bot-"))
     try:
-        try:
-            with yt_dlp.YoutubeDL(_ydl_options(target_dir)) as ydl:
-                info = ydl.extract_info(url, download=True)
-        except yt_dlp.utils.DownloadError as exc:
-            raise ExtractionError(f"yt-dlp could not download {url}: {exc}") from exc
-
-        path = _downloaded_path(info, target_dir)
-        if path is None:
-            raise ExtractionError(f"yt-dlp reported success but left no file for {url}")
-        if path.stat().st_size == 0:
-            raise ExtractionError(f"yt-dlp left an empty file for {url}")
-        yield path
+        yield target_dir
     finally:
         shutil.rmtree(target_dir, ignore_errors=True)
+
+
+def download_into(url: str, target_dir: Path) -> Media:
+    """Download `url` into `target_dir`. Blocking. Nothing here knows about Telegram.
+
+    Raises ExtractionError if the download produced no usable file. Split out from
+    the context manager below so the Telegram layer can run it off the event loop
+    while still holding the file open for the upload.
+    """
+    try:
+        with yt_dlp.YoutubeDL(_ydl_options(target_dir)) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as exc:
+        raise ExtractionError(f"yt-dlp could not download {url}: {exc}") from exc
+
+    path = _downloaded_path(info, target_dir)
+    if path is None:
+        raise ExtractionError(f"yt-dlp reported success but left no file for {url}")
+    if path.stat().st_size == 0:
+        raise ExtractionError(f"yt-dlp left an empty file for {url}")
+    return Media(path=path, has_audio=_has_audio(info))
+
+
+@contextmanager
+def downloaded_media(url: str) -> Iterator[Media]:
+    """Download `url` and yield it; the temp directory dies with the `with` block.
+
+    A context manager rather than a plain function returning a path, because the
+    caller needs the file to still exist while it uses it.
+    """
+    with temp_workspace() as target_dir:
+        yield download_into(url, target_dir)
+
+
+def _has_audio(info: dict | None) -> bool:
+    """Whether the downloaded stream carries sound. Assume yes when unsure.
+
+    A silent clip is what Telegram calls an *animation* (a GIF, essentially), and it
+    renders differently from a video. Guessing wrong in that direction only costs a
+    play button, so an unknown means "video".
+    """
+    if not info:
+        return True
+    entries = info.get("requested_downloads") or []
+    acodec = entries[0].get("acodec") if entries else info.get("acodec")
+    return acodec != "none"
 
 
 def _downloaded_path(info: dict | None, target_dir: Path) -> Path | None:
@@ -164,40 +262,207 @@ def _downloaded_path(info: dict | None, target_dir: Path) -> Path | None:
     return max(files, key=lambda p: p.stat().st_size) if files else None
 
 
+# --------------------------------------------------------------------------------
+# Pure helpers. No network, no Telegram objects -- which is what makes the
+# self-check below possible without a token.
+# --------------------------------------------------------------------------------
+
+
+def find_urls(text: str | None) -> list[str]:
+    """Every http(s) URL in a message body, in order, de-duplicated.
+
+    Requires a scheme on purpose: "eso lo vi en instagram.com" is someone naming a
+    site, not asking for a download.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    for match in URL_PATTERN.findall(text):
+        url = match.rstrip(URL_TRAILING_JUNK)
+        if url and url not in found:
+            found.append(url)
+    return found
+
+
+def is_supported(url: str) -> bool:
+    """Whether the URL points at one of the three sites the group actually pastes."""
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return host in SUPPORTED_HOSTS or any(host.endswith("." + h) for h in SUPPORTED_HOSTS)
+
+
+def media_kind(filename: str | Path, has_audio: bool = True) -> str:
+    """Classify a downloaded file as "photo", "animation" or "video".
+
+    Telegram's own taxonomy: an animation is a silent short clip or a GIF, and it
+    plays looping without a play button. A video has sound and player controls.
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix in PHOTO_SUFFIXES:
+        return "photo"
+    if suffix in ANIMATION_SUFFIXES:
+        return "animation"
+    return "video" if has_audio else "animation"
+
+
+def reply_method_name(kind: str) -> str:
+    """The telegram.Message method that renders `kind` inline."""
+    try:
+        return REPLY_METHODS[kind]
+    except KeyError:
+        raise ValueError(f"unknown media kind {kind!r}") from None
+
+
+# --------------------------------------------------------------------------------
+# The Telegram layer: a thin shell over the pure helpers above.
+# --------------------------------------------------------------------------------
+
+
+async def on_start(update: telegram.Update, _context: object) -> None:
+    message = update.effective_message
+    if message:
+        await message.reply_text("mandá un link de YouTube, Instagram o Facebook y te lo bajo")
+
+
+async def on_message(update: telegram.Update, _context: object) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    for url in find_urls(message.text or message.caption):
+        if is_supported(url):
+            await _deliver(message, url)
+
+
+async def _deliver(message: telegram.Message, url: str) -> None:
+    try:
+        with temp_workspace() as workspace:
+            # yt-dlp is blocking; keep it off the event loop so the bot stays responsive.
+            media = await asyncio.to_thread(download_into, url, workspace)
+            kind = media_kind(media.path, media.has_audio)
+            log.info("sending %s as %s (%d bytes)", url, kind, media.path.stat().st_size)
+            await _send(message, kind, media)
+    except Exception:
+        # Never a stack trace in the group. The real error goes to the log.
+        log.exception("failed to deliver %s", url)
+        await message.reply_text(FAILURE_REPLY)
+
+
+async def _send(message: telegram.Message, kind: str, media: Media) -> None:
+    reply = getattr(message, reply_method_name(kind))
+    extra = {"supports_streaming": True} if kind == "video" else {}
+    await reply(media.path, write_timeout=UPLOAD_TIMEOUT, read_timeout=UPLOAD_TIMEOUT, **extra)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    read_token()
-    print("Token found. Nothing is wired to Telegram yet.")
+    if not ffmpeg_path():
+        log.warning("ffmpeg is not on PATH; merged-quality downloads will fail")
+    app = Application.builder().token(read_token()).build()
+    app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_message))
+    log.info("polling; privacy mode must be OFF for the bot to see plain links (see README.md)")
+    app.run_polling()
 
 
 # --------------------------------------------------------------------------------
 # Self-check: `python bot.py --self-check`. Plain asserts, no test framework.
 # --------------------------------------------------------------------------------
 
-SELF_CHECK_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+# One known-good public URL per site. These hit the network on purpose: extraction
+# rotting is this project's real failure mode, and only a real download detects it.
+SELF_CHECK_URLS = {
+    "youtube": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "instagram": "https://www.instagram.com/reel/DbGNFqVKnB-/?igsh=OHFxM3dxdmIzdTQ5",
+    "facebook": "https://www.facebook.com/share/v/1L8yZSLkWq/",
+}
 
 
-def _self_check() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def _check_pure_helpers() -> None:
+    # find_urls: no URL, one mid-sentence, several, a bare domain, trailing punctuation.
+    assert find_urls("") == []
+    assert find_urls(None) == []
+    assert find_urls("no hay nada aca") == []
+    assert find_urls("miren instagram.com que buen post") == [], "a bare domain is not a link"
+    assert find_urls("che miren https://youtu.be/abc esto") == ["https://youtu.be/abc"]
+    assert find_urls("https://youtu.be/abc y https://youtu.be/def") == [
+        "https://youtu.be/abc",
+        "https://youtu.be/def",
+    ]
+    assert find_urls("mira https://youtu.be/abc.") == ["https://youtu.be/abc"], "strip trailing dot"
+    assert find_urls("(https://youtu.be/abc)") == ["https://youtu.be/abc"]
+    assert find_urls("https://youtu.be/abc https://youtu.be/abc") == ["https://youtu.be/abc"]
+    assert find_urls("HTTPS://YOUTU.BE/abc") == ["HTTPS://YOUTU.BE/abc"]
+    print("ok  find_urls")
 
+    # is_supported: the three sites, their subdomains and short forms, and nothing else.
+    for url in (
+        "https://www.youtube.com/watch?v=x",
+        "https://youtu.be/x",
+        "https://m.youtube.com/watch?v=x",
+        "https://www.instagram.com/reel/x/",
+        "https://instagram.com/p/x/",
+        "https://www.facebook.com/share/v/x/",
+        "https://fb.watch/x/",
+    ):
+        assert is_supported(url), f"{url} should be supported"
+    for url in (
+        "https://example.com/article",
+        "https://www.tiktok.com/@a/video/1",
+        "https://notyoutube.com/watch?v=x",
+        "https://youtube.com.evil.example/watch?v=x",
+    ):
+        assert not is_supported(url), f"{url} should not be supported"
+    print("ok  is_supported")
+
+    # media_kind and the reply-method mapping.
+    assert media_kind("clip.mp4", has_audio=True) == "video"
+    assert media_kind("clip.mp4", has_audio=False) == "animation", "silent clip is an animation"
+    assert media_kind("clip.webm", has_audio=True) == "video"
+    assert media_kind("meme.gif", has_audio=False) == "animation"
+    assert media_kind("meme.GIF", has_audio=True) == "animation", "suffix match is case-insensitive"
+    assert media_kind("photo.jpg") == "photo"
+    assert media_kind(Path("/tmp/x/photo.PNG")) == "photo"
+    assert media_kind("photo.webp", has_audio=False) == "photo"
+    print("ok  media_kind")
+
+    assert reply_method_name("video") == "reply_video"
+    assert reply_method_name("photo") == "reply_photo"
+    assert reply_method_name("animation") == "reply_animation"
+    try:
+        reply_method_name("document")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("reply_method_name should reject unknown kinds")
+    # Catch a python-telegram-bot rename without touching the network.
+    for kind, name in REPLY_METHODS.items():
+        assert hasattr(telegram.Message, name), f"telegram.Message has no {name} (for {kind})"
+    print("ok  reply_method_name maps onto real telegram.Message methods")
+
+
+def _check_extraction() -> None:
     assert ffmpeg_path(), "ffmpeg not found on PATH -- merged 720p cannot work without it"
     print(f"ok  ffmpeg resolved from PATH at {ffmpeg_path()}")
 
-    # This one genuinely hits the network. It is the only honest way to know that
-    # extraction still works, and it is the check this project actually needs.
-    print(f"..  downloading {SELF_CHECK_URL}")
-    with downloaded_media(SELF_CHECK_URL) as path:
-        assert path.is_file(), f"expected a file at {path}"
-        size = path.stat().st_size
-        assert size > 0, f"downloaded file is empty: {path}"
-        assert size <= TELEGRAM_MAX_UPLOAD, (
-            f"downloaded {size} bytes, over Telegram's {TELEGRAM_MAX_UPLOAD}-byte ceiling"
-        )
-        print(f"ok  downloaded {path.name} ({size} bytes)")
-        leftover_dir = path.parent
-    assert not leftover_dir.exists(), f"temp dir {leftover_dir} survived the context manager"
-    print("ok  temp directory cleaned up")
+    for site, url in SELF_CHECK_URLS.items():
+        print(f"..  {site}: downloading {url}")
+        with downloaded_media(url) as media:
+            assert media.path.is_file(), f"{site}: expected a file at {media.path}"
+            size = media.path.stat().st_size
+            assert size > 0, f"{site}: downloaded file is empty"
+            assert size <= TELEGRAM_MAX_UPLOAD, (
+                f"{site}: {size} bytes is over Telegram's {TELEGRAM_MAX_UPLOAD}-byte ceiling"
+            )
+            kind = media_kind(media.path, media.has_audio)
+            print(f"ok  {site}: {media.path.name} {size} bytes -> {reply_method_name(kind)}")
+            workspace = media.path.parent
+        assert not workspace.exists(), f"{site}: temp dir {workspace} survived the context manager"
+    print("ok  temp directories cleaned up")
 
+
+def _self_check() -> None:
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+    _check_pure_helpers()
+    _check_extraction()
     print("\nself-check passed")
 
 

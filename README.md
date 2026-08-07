@@ -32,11 +32,10 @@ Self-check (no network for the pure helpers, one real YouTube download for the e
 
 ### Optional: `YTDLP_COOKIES`
 
-Set `YTDLP_COOKIES` to the path of a Netscape-format cookie file and the bot passes it to yt-dlp;
-leave it unset and nothing changes. **Instagram in particular is expected to need it** — without
-cookies it answers with an empty media response even for public posts (measured 2026-08-07). Use a
-throwaway account, never your own, and keep the file out of git (`cookies.txt` and `*.cookies.txt`
-are already ignored).
+Insurance, not a requirement — **all three sites extract anonymously today** (measured 2026-08-07;
+see Operations). If that changes, set `YTDLP_COOKIES` to the path of a Netscape-format cookie file
+and the bot passes it to yt-dlp; leave it unset and nothing changes. Use a throwaway account, never
+your own, and keep the file out of git (`cookies.txt` and `*.cookies.txt` are already ignored).
 
 ## BotFather setup — the bot does nothing without this
 
@@ -72,3 +71,17 @@ because YouTube, Instagram and Facebook change their pages without warning.
 - **Telegram's bot upload ceiling is 50 MB** for video, animation and generic files, and 10 MB for
   photos (https://core.telegram.org/bots/api#sending-files, checked 2026-08-07). The quality cap is
   sized against that, not against what the source video happens to be.
+- **What the group actually gets**, downloaded and inspected with `ffprobe` on 2026-08-07, all three
+  anonymously with no cookies:
+
+  | Site | Result | Merge |
+  |---|---|---|
+  | YouTube, 3.5-min video | 1280x720 H.264/AAC mp4, 29,969,207 B | yes, ffmpeg |
+  | Instagram reel, 30 s | 772x720 H.264/AAC mp4, 1,272,833 B | no |
+  | Facebook reel, 27 s | 720x900 H.264/AAC mp4, 1,881,291 B | no |
+
+  The format string prefers H.264/AAC deliberately: that is what Telegram clients play inline
+  rather than showing as a file. On YouTube it costs about 9 MB over the AV1 alternative, which is
+  a good trade against a 50 MB ceiling.
+- The bot only answers links to those three sites. Anything else in the chat is ignored rather than
+  attempted and apologised for.
