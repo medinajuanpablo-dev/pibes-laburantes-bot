@@ -85,3 +85,8 @@ because YouTube, Instagram and Facebook change their pages without warning.
   a good trade against a 50 MB ceiling.
 - The bot only answers links to those three sites. Anything else in the chat is ignored rather than
   attempted and apologised for.
+- **If a download comes out over the ceiling, the bot replies with a link instead of failing.** The
+  decision is made on the real size of the finished file, never on yt-dlp's pre-download estimate —
+  that estimate reports `NA` on both Instagram and Facebook, so anything built on it would be dead
+  code. The cost is that an oversized video is downloaded before being turned down, which is fine
+  at this volume.

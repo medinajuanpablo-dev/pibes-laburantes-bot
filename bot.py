@@ -64,7 +64,7 @@ TELEGRAM_MAX_PHOTO_UPLOAD = 10 * 1024 * 1024
 # ponytail: the height cap is NOT a size guarantee. Branch 2 accepts unknown heights
 # by design, and portrait video (the Facebook clip is 720x900) can exceed 720 in the
 # long dimension while passing a `height<=720` filter or skipping it entirely. The
-# only real size guard is the byte count of the finished file -- see fits_in_telegram.
+# only real size guard is the byte count of the finished file -- see delivery_decision.
 MEDIA_FORMAT = (
     "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/"
     "b[ext=mp4][height<=?720]/"
@@ -126,6 +126,7 @@ class ExtractionError(Exception):
 class Media(NamedTuple):
     path: Path
     has_audio: bool
+    direct_url: str | None = None
 
 
 def read_token() -> str:
@@ -218,7 +219,7 @@ def download_into(url: str, target_dir: Path) -> Media:
         raise ExtractionError(f"yt-dlp reported success but left no file for {url}")
     if path.stat().st_size == 0:
         raise ExtractionError(f"yt-dlp left an empty file for {url}")
-    return Media(path=path, has_audio=_has_audio(info))
+    return Media(path=path, has_audio=_has_audio(info), direct_url=_direct_url(info))
 
 
 @contextmanager
@@ -244,6 +245,25 @@ def _has_audio(info: dict | None) -> bool:
     entries = info.get("requested_downloads") or []
     acodec = entries[0].get("acodec") if entries else info.get("acodec")
     return acodec != "none"
+
+
+def _direct_url(info: dict | None) -> str | None:
+    """A single URL that points at the media itself, when one exists.
+
+    Only offered for downloads that were one ready-made file. A merged download has
+    two source URLs, one of them silent video and the other audio, and handing either
+    to the group would be worse than handing them nothing.
+
+    ponytail: these URLs are signed and expire in hours. Good enough for "watch it
+    now"; the caller falls back to the page URL when this returns None.
+    """
+    if not info:
+        return None
+    entries = info.get("requested_downloads") or []
+    if len(entries) != 1 or entries[0].get("requested_formats"):
+        return None
+    url = entries[0].get("url")
+    return url if isinstance(url, str) and url.startswith("http") else None
 
 
 def _downloaded_path(info: dict | None, target_dir: Path) -> Path | None:
@@ -312,6 +332,29 @@ def reply_method_name(kind: str) -> str:
         raise ValueError(f"unknown media kind {kind!r}") from None
 
 
+def upload_ceiling(kind: str) -> int:
+    """Telegram's bot-upload ceiling for this media kind, in bytes."""
+    return TELEGRAM_MAX_PHOTO_UPLOAD if kind == "photo" else TELEGRAM_MAX_UPLOAD
+
+
+def delivery_decision(size_bytes: int, kind: str) -> str:
+    """"file" if Telegram will accept the upload, "link" if it is too big.
+
+    ponytail: this takes the real byte count of the finished file on disk, and it has
+    to stay that way. yt-dlp's pre-download `filesize_approx` came back NA for both
+    the Instagram and the Facebook clip on 2026-08-07, so any size logic built on the
+    estimate would be dead code on two of the three sites. The cost is that an
+    oversized video is downloaded before being rejected -- cheap at 20 links a week.
+    """
+    return "file" if size_bytes <= upload_ceiling(kind) else "link"
+
+
+def oversize_reply(size_bytes: int, link: str) -> str:
+    """The Spanish message sent instead of a file that will not fit."""
+    megabytes = size_bytes / 1024 / 1024
+    return f"pesa {megabytes:.0f} MB y Telegram no me deja subirlo. Te lo dejo acá: {link}"
+
+
 # --------------------------------------------------------------------------------
 # The Telegram layer: a thin shell over the pure helpers above.
 # --------------------------------------------------------------------------------
@@ -338,7 +381,12 @@ async def _deliver(message: telegram.Message, url: str) -> None:
             # yt-dlp is blocking; keep it off the event loop so the bot stays responsive.
             media = await asyncio.to_thread(download_into, url, workspace)
             kind = media_kind(media.path, media.has_audio)
-            log.info("sending %s as %s (%d bytes)", url, kind, media.path.stat().st_size)
+            size = media.path.stat().st_size
+            if delivery_decision(size, kind) == "link":
+                log.info("%s is %d bytes (%s), over the ceiling -- replying with a link", url, size, kind)
+                await message.reply_text(oversize_reply(size, media.direct_url or url))
+                return
+            log.info("sending %s as %s (%d bytes)", url, kind, size)
             await _send(message, kind, media)
     except Exception:
         # Never a stack trace in the group. The real error goes to the log.
@@ -438,6 +486,24 @@ def _check_pure_helpers() -> None:
         assert hasattr(telegram.Message, name), f"telegram.Message has no {name} (for {kind})"
     print("ok  reply_method_name maps onto real telegram.Message methods")
 
+    # Size fallback, driven by plain numbers -- no huge download involved.
+    assert delivery_decision(0, "video") == "file"
+    assert delivery_decision(1, "video") == "file"
+    assert delivery_decision(TELEGRAM_MAX_UPLOAD - 1, "video") == "file"
+    assert delivery_decision(TELEGRAM_MAX_UPLOAD, "video") == "file", "the ceiling itself fits"
+    assert delivery_decision(TELEGRAM_MAX_UPLOAD + 1, "video") == "link"
+    assert delivery_decision(700 * 1024 * 1024, "animation") == "link"
+    assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD, "photo") == "file"
+    assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD + 1, "photo") == "link", "photos cap lower"
+    assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD + 1, "video") == "file", "videos do not"
+    print("ok  delivery_decision")
+
+    message = oversize_reply(120 * 1024 * 1024, "https://youtu.be/abc")
+    assert "https://youtu.be/abc" in message, "the fallback must carry the link"
+    assert "120 MB" in message, message
+    assert "Traceback" not in message
+    print("ok  oversize_reply")
+
 
 def _check_extraction() -> None:
     assert ffmpeg_path(), "ffmpeg not found on PATH -- merged 720p cannot work without it"
@@ -449,10 +515,10 @@ def _check_extraction() -> None:
             assert media.path.is_file(), f"{site}: expected a file at {media.path}"
             size = media.path.stat().st_size
             assert size > 0, f"{site}: downloaded file is empty"
-            assert size <= TELEGRAM_MAX_UPLOAD, (
-                f"{site}: {size} bytes is over Telegram's {TELEGRAM_MAX_UPLOAD}-byte ceiling"
-            )
             kind = media_kind(media.path, media.has_audio)
+            assert delivery_decision(size, kind) == "file", (
+                f"{site}: {size} bytes is over the {upload_ceiling(kind)}-byte ceiling for {kind}"
+            )
             print(f"ok  {site}: {media.path.name} {size} bytes -> {reply_method_name(kind)}")
             workspace = media.path.parent
         assert not workspace.exists(), f"{site}: temp dir {workspace} survived the context manager"
