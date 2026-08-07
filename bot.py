@@ -810,7 +810,17 @@ def main() -> None:
     app = build_application(read_token())
     log.info("polling; privacy mode must be OFF for the bot to see plain links (see README.md)")
     log.info("only one instance can poll this token at a time (see README.md: the baton pass)")
-    app.run_polling()
+    # ponytail: whatever was posted while nobody was hosting is lost. Telegram holds
+    # updates for about 24 hours and run_polling() replays them all by default, so
+    # the first person to open the launcher would dump everything posted in the gap
+    # into the group in one burst -- with a rotating host that is the normal case,
+    # not an edge case. Measured with nobody running: 7 updates queued, 2 of them
+    # reels. At ~20 links a week the flood is clearly worse than the loss, and
+    # anybody can paste the link again. The ceiling is exactly that: a link posted
+    # while the bot was off never arrives. Upgrade path if it ever bites, and it
+    # needs no new dependency: keep the backlog but deliver only the updates whose
+    # message date is within a few minutes of startup, dropping the rest.
+    app.run_polling(drop_pending_updates=True)
 
 
 # --------------------------------------------------------------------------------
@@ -1286,6 +1296,39 @@ def _check_conflict_handling() -> None:
     print("ok  a conflict is one line, and only a sustained one stops the bot")
 
 
+def _check_startup_drops_the_backlog() -> None:
+    """Starting must not replay everything posted while nobody was hosting.
+
+    main() is reached with a stand-in Application, so the kwarg is asserted where it
+    is actually passed rather than as a constant that agrees with itself. The token
+    is a shaped fake and no request is made: build_application is replaced first.
+    """
+
+    class PollRecordingApplication:
+        def __init__(self) -> None:
+            self.kwargs: dict = {}
+
+        def run_polling(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    application = PollRecordingApplication()
+    real_build = globals()["build_application"]
+    globals()["build_application"] = lambda _token: application
+    previous = os.environ.get(TOKEN_ENV_VAR)
+    os.environ[TOKEN_ENV_VAR] = "123456:AAHnot-a-real-token-nothing-is-sent"
+    try:
+        main()
+    finally:
+        globals()["build_application"] = real_build
+        if previous is None:
+            del os.environ[TOKEN_ENV_VAR]
+        else:
+            os.environ[TOKEN_ENV_VAR] = previous
+
+    assert application.kwargs.get("drop_pending_updates") is True, application.kwargs
+    print("ok  startup drops the backlog instead of flooding the group")
+
+
 def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
@@ -1293,6 +1336,7 @@ def _self_check() -> None:
     _check_message_logging()
     _check_failure_path()
     _check_conflict_handling()
+    _check_startup_drops_the_backlog()
     _check_extraction()
     print("\nself-check passed")
 
