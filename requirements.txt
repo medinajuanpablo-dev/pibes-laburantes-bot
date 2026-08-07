@@ -1,0 +1,4 @@
+# Pinned on 2026-08-07. Both were the latest releases on PyPI that day.
+# yt-dlp is the part that rots: see the Operations section of README.md.
+yt-dlp[default,curl-cffi]==2026.7.4
+python-telegram-bot==22.8
