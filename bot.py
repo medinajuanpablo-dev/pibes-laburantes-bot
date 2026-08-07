@@ -507,14 +507,45 @@ async def _deliver(message: telegram.Message, url: str) -> None:
             size = media.path.stat().st_size
             if delivery_decision(size, kind) == "link":
                 log.info("%s is %d bytes (%s), over the ceiling -- replying with a link", url, size, kind)
-                await message.reply_text(oversize_reply(size, media.direct_url or url))
+                await _reply_text(message, oversize_reply(size, media.direct_url or url))
                 return
             log.info("sending %s as %s (%d bytes)", url, kind, size)
             await _send(message, kind, media)
     except Exception:
         # Never a stack trace in the group. The real error goes to the log.
         log.exception("failed to deliver %s", url)
-        await message.reply_text(FAILURE_REPLY)
+        await _apologise(message)
+
+
+async def _reply_text(message: telegram.Message, text: str) -> None:
+    """Send a short text reply with timeouts of its own. May raise."""
+    await message.reply_text(
+        text,
+        connect_timeout=CONNECT_TIMEOUT,
+        write_timeout=TEXT_REPLY_TIMEOUT,
+        read_timeout=TEXT_REPLY_TIMEOUT,
+    )
+
+
+async def _apologise(message: telegram.Message) -> None:
+    """Tell the group the link failed. This call may not raise, ever.
+
+    It is the last line of defence, so it is the one call that cannot itself be
+    unprotected: a network bad enough to fail an upload is frequently bad enough to
+    fail the apology, and an exception escaping here escapes _deliver too. Observed
+    live on 2026-08-07: the upload timed out, reply_text timed out five seconds
+    later, the exception left _deliver, and python-telegram-bot logged "No error
+    handlers are registered". The group got no video and no apology -- the silent
+    drop PLAN.md forbids.
+
+    Swallowing is correct here and nowhere else. There is nothing above this to
+    handle the failure and no third message worth attempting; the log is the only
+    honest destination left.
+    """
+    try:
+        await _reply_text(message, FAILURE_REPLY)
+    except Exception:
+        log.exception("could not deliver the failure reply either; the group got nothing")
 
 
 async def _send(message: telegram.Message, kind: str, media: Media) -> None:
@@ -740,9 +771,61 @@ def _check_extraction() -> None:
     print("ok  temp directories cleaned up")
 
 
+def _check_failure_path() -> None:
+    """_deliver must survive a download AND a reply that both blow up.
+
+    Doubles built inline: a message whose reply_text always raises, and a stand-in
+    for download_into that raises before any network call. No mocking framework.
+    """
+
+    class ExplodingMessage:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def reply_text(self, _text: str, **_kwargs: object) -> None:
+            self.attempts += 1
+            raise telegram.error.TimedOut
+
+    class Captured(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.errors: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.levelno >= logging.ERROR:
+                self.errors.append(record.getMessage())
+
+    def _exploding_download(_url: str, _target_dir: Path) -> Media:
+        raise ExtractionError("simulated extractor failure")
+
+    captured = Captured()
+    log.addHandler(captured)
+    real_download = globals()["download_into"]
+    globals()["download_into"] = _exploding_download
+    # Both failures are deliberate here, so keep their tracebacks out of the
+    # self-check's output -- they are asserted on below, not ignored.
+    log.propagate = False
+    try:
+        message = ExplodingMessage()
+        # If this raises, _deliver's except block is not a net and the group gets
+        # nothing -- the exact live failure this guards against.
+        asyncio.run(_deliver(message, "https://youtu.be/never-fetched"))
+    finally:
+        log.propagate = True
+        globals()["download_into"] = real_download
+        log.removeHandler(captured)
+
+    assert message.attempts == 1, f"the apology must be attempted exactly once, got {message.attempts}"
+    assert len(captured.errors) == 2, f"both failures must be logged, got {captured.errors}"
+    assert any("failed to deliver" in m for m in captured.errors), captured.errors
+    assert any("got nothing" in m for m in captured.errors), captured.errors
+    print("ok  _deliver swallows a failing download AND a failing apology")
+
+
 def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
+    _check_failure_path()
     _check_extraction()
     print("\nself-check passed")
 
