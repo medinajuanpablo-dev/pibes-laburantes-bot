@@ -189,3 +189,44 @@ pattern is visible.
 
 ## Stop evidence — fill ONLY when invoking the self-stop bar
 - —
+
+---
+
+## Round 3 — Instagram image posts (added after the first close, on the user's request)
+
+Not scope creep: the owner's original framing was *"el video **o imagen** plenos"*, and images had
+never worked. `instagram.com/p/DbvWPFQxPkI/` failed with `There is no video in this post`.
+
+**Landing: APPROVED** — `0d30165` (code) + `fa6d857` (docs), merged and pushed.
+
+| Layer | Evidence |
+|---|---|
+| Gates | Run by me on the commit via `git archive` (not the agent's dirty worktree): `py_compile` OK, self-check exit 0, **four** real downloads including `instagram image: DbvWPFQxPkI.12.jpg 191815 bytes, image2/mjpeg 1072x1197 -> reply_photo` |
+| Diff | `bot.py` only in the code commit; docs commit left `bot.py` **byte-identical** (blob `68b3f16` before and after), so the gate carries over |
+| Live | **RUN** — I sent that exact JPEG to the real group with `sendPhoto`: accepted as `photo`, 1072x1197, 191,689 B. End-to-end through the bot itself is still pending the owner's retest. |
+| Adversarial | I removed `is_image_post`'s `formats` guard on a clean copy — the check went **RED** with *"a video whose formats exist must never be treated as an image"*. Prediction written first. |
+
+**I merged before finishing the adversarial layer**, because the owner was live-testing and the code
+was gate-green and read. Logged here because it inverts the normal order; the mutation passed
+minutes later, so nothing came of it, but the sequencing was a deliberate exception and not the rule.
+
+**Three of my own claims in that order were wrong, and the agent caught all three:**
+1. *"Set `ignore_no_formats_error` in the options"* — it does nothing on the download path;
+   yt-dlp's `dl()` calls `raise_no_formats(forced=True)`. It works only with `download=False`.
+2. *"Select the best thumbnail by resolution"* — an image post's thumbnails carry **no** dimensions
+   at all (a reel's do, which is what makes the assumption easy).
+3. *"yt-dlp orders thumbnails worst-to-best"* — it does not; the reference post runs 1149k pixels at
+   index 0, 22k at index 1, 1283k at index 12. Last-is-best was luck.
+
+The agent also reported that **three of its own selection mutations were GREEN on the first pass** —
+its check proved the image decoded, never that it was the best one. Fourth time this session that
+mutation testing caught a hole a passing run did not.
+
+**Override I authorised:** the original order barred editing `AGENTS.md`; this one explicitly asked
+for it. The agent flagged the conflict instead of taking it silently.
+
+## Still unproven at close
+- **Oversize → direct link** — never executed against Telegram. Needs one >50 MB download.
+- **Instagram carousels** — refused by design, never measured. No public example found.
+- **End-to-end image delivery through the bot** — the Telegram half is proven (`sendPhoto`), the
+  full paste-to-photo path awaits the owner's retest on the restarted process.
