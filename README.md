@@ -49,8 +49,12 @@ in a group is invisible to them. Two steps, both in a chat with @BotFather:
 
 Verified against Telegram's own documentation on 2026-08-07, which still states, of disabling
 privacy mode: *"The bot will need to be re-added to the group for this change to take effect."*
-(https://core.telegram.org/bots/features#privacy-mode). The alternative Telegram documents is
-making the bot a group **admin** — admins always receive all messages, privacy mode or not.
+(https://core.telegram.org/bots/features#privacy-mode).
+
+**Simpler alternative, and the one to use if you are not the group's admin: make the bot a group
+administrator.** Admins receive all messages regardless of privacy mode, with no BotFather step and
+no removing and re-adding. Confirmed on a real group on 2026-08-07 — `getChatMember` returned
+`status: administrator` and the bot began receiving plain links immediately.
 
 Then add the bot to the group and paste a link.
 
