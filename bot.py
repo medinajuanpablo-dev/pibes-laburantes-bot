@@ -771,6 +771,36 @@ def _check_extraction() -> None:
     print("ok  temp directories cleaned up")
 
 
+def _check_send_timeouts() -> None:
+    """Every outbound call must carry a connect_timeout of its own.
+
+    Without it PTB silently uses its 5 s default and a generous upload timeout buys
+    nothing, which is exactly how the live uploads died.
+    """
+
+    class CapturingMessage:
+        def __init__(self) -> None:
+            self.kwargs: dict = {}
+
+        async def reply_video(self, _video: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        async def reply_text(self, _text: str, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    video = CapturingMessage()
+    asyncio.run(_send(video, "video", Media(Path("x.mp4"), True, None, 1280, 720, 10.0)))
+    assert video.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, video.kwargs
+    assert video.kwargs.get("write_timeout") == UPLOAD_TIMEOUT, video.kwargs
+    assert video.kwargs.get("read_timeout") == UPLOAD_TIMEOUT, video.kwargs
+
+    text = CapturingMessage()
+    asyncio.run(_reply_text(text, "hola"))
+    assert text.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, text.kwargs
+    assert text.kwargs.get("write_timeout") == TEXT_REPLY_TIMEOUT, text.kwargs
+    print("ok  outbound calls carry an explicit connect_timeout")
+
+
 def _check_failure_path() -> None:
     """_deliver must survive a download AND a reply that both blow up.
 
@@ -825,6 +855,7 @@ def _check_failure_path() -> None:
 def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
+    _check_send_timeouts()
     _check_failure_path()
     _check_extraction()
     print("\nself-check passed")
