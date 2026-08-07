@@ -52,6 +52,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **The self-check's log-capture raises the logger's level.** `_self_check` configures logging at
   WARNING, so INFO records are dropped before reaching any handler; a logging assert written without
   that is silently vacuous.
+- **`ignore_no_formats_error` does nothing while downloading.** yt-dlp's `dl()` calls
+  `raise_no_formats(info, forced=True)` and the forced arm raises whatever the flag says. It works
+  only with `download=False`, which is why the image fallback probes separately instead of folding
+  the flag into `_ydl_options` (`README.md` §4.8).
+- **An image post's thumbnails carry no dimensions, and the list is not sorted worst-to-best.** A
+  reel's thumbnails *do* carry width/height, which makes the wrong assumption easy. Selection is by
+  downloaded file size for that reason. Also: `duration` and `title` discriminate image from video
+  not at all — `formats` is the only signal.
 
 ## How to prove a change
 
@@ -64,11 +72,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   assert that covered only one of two branches.
   Mutations that must stay red: `MEDIA_FORMAT` → codec-agnostic · `_send` drops `connect_timeout` ·
   the apology left unprotected · `MESSAGE_FILTER` → `filters.TEXT | filters.CAPTION` ·
-  `delivery_decision` `<=` → `<` · the ignore-logging dropping its rejected URLs or leaking the body.
-- **The self-check really downloads from all three sites.** That is deliberate: extraction rotting is
-  this project's actual failure mode and only a real download detects it. Keep the clips short, and
-  when you change one, verify the codec mutation still goes red on it — a clip that only offers h264
-  would silently empty that check.
+  `delivery_decision` `<=` → `<` · the ignore-logging dropping its rejected URLs or leaking the body ·
+  `is_image_post` dropping its `formats` or carousel guard · the thumbnail chosen by list order
+  rather than by size.
+- **The self-check really downloads four times** — YouTube, an Instagram reel, an Instagram image
+  post, Facebook. That is deliberate: extraction rotting is this project's actual failure mode and
+  only a real download detects it. Keep the clips short, and when you change one, verify the codec
+  mutation still goes red on it — a clip that only offers h264 would silently empty that check.
+  Entries are `(url, expected_kind)` and the kind is asserted, so a reel arriving as a still fails.
 - **You cannot test the Telegram layer without a token, and you should not try.** No `.env` exists in
   a fresh worktree. Deterministic checks are yours; the live run belongs to whoever holds the token.
   *"I could not test this live"* is the correct note, not a failure.
@@ -81,6 +92,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   Not done because no confirmed case has needed it yet.
 - **The oversize → direct-link path has never run against Telegram.** Nothing in the live session
   exceeded 50 MB. It is covered by asserts and a source read only. Treat it as unproven.
+- **Instagram carousels are refused, not handled.** A multi-item post makes `is_image_post` return
+  `False`, so the group gets the apology. yt-dlp models carousels as playlists and its mixed
+  photo/video handling is an open upstream problem (#7569, #11792); no public carousel was available
+  to measure. Upgrade path: find one, measure the entries, then decide first-slide vs all.
 - **`pool_timeout` is left at its 1.0 s default.** It governs contention for a 256-connection pool
   that a sequential bot never contends for.
 - **PTB processes updates sequentially**, so a slow upload blocks the handler for its duration. The

@@ -25,6 +25,9 @@ Telegram update
        └─ _deliver(url)
             ├─ temp_workspace()          mkdtemp, removed in a finally
             ├─ download_into()           yt-dlp, format MEDIA_FORMAT, merged by ffmpeg if needed
+            │     └─ on DownloadError → _image_fallback()   is the post merely video-less?
+            │            ├─ is_image_post()          no formats + thumbnails + not a carousel
+            │            └─ _download_best_thumbnail()  fetch all, keep the largest file
             ├─ media_kind()              photo | animation | video, from suffix + presence of audio
             ├─ delivery_decision()       real bytes on disk vs the per-kind ceiling
             │     ├─ "file" → _send()        reply_video / reply_photo / reply_animation
@@ -47,6 +50,7 @@ token.** That is what makes the self-check possible.
 | `delivery_decision(bytes, kind)` | `"file"` or `"link"` |
 | `video_kwargs(media)` | `supports_streaming` plus width/height/duration **when known**, never zeros |
 | `telegram_renders_inline(container, codec)` | mp4 container and not AV1 |
+| `is_image_post(info)` | the post has **no** video formats, **has** thumbnails, and is not a carousel |
 | `oversize_reply(bytes, link)` | the Spanish fallback message |
 
 ---
@@ -82,9 +86,10 @@ plist in this repo** — see §6.
 .venv/bin/python bot.py --self-check
 ```
 
-~20 seconds. 13 assertion groups, then a **real download from all three sites**, each one probed
-with `ffprobe` to confirm the container and codec Telegram will actually receive. It exits non-zero
-on the first failure. Run it before every commit, together with `python -m py_compile bot.py`.
+~25 seconds. 14 assertion groups, then **four real downloads** — YouTube, an Instagram reel, an
+Instagram image post and Facebook — each probed with `ffprobe` to confirm what Telegram will
+actually receive, and each asserted to come back as the *kind* it should be. It exits non-zero on
+the first failure. Run it before every commit, together with `python -m py_compile bot.py`.
 
 ---
 
@@ -200,11 +205,50 @@ All three sites extract **without cookies**. `PLAN.md` claimed Instagram needed 
 was broken; both claims were wrong, and so was a 2026 web search asserting Instagram has required
 authentication since 2024. What actually fails is the Instagram **profile page** URL shape
 (`instagram.com/<user>/`), which yt-dlp marks broken upstream — that is what the original probe
-tested. Reels and `share/v/` · `share/r/` links work fine.
+tested. Reels and `share/v/` · `share/r/` links work fine, and so do image-only `/p/` posts — see
+§4.8, which is a different mechanism entirely.
 
 `YTDLP_COOKIES` exists as insurance, not a requirement: point it at a Netscape-format cookie file
 and yt-dlp gets it; leave it unset and nothing changes. If it ever becomes necessary, use a
 **throwaway account** — the ban risk is real and the account is the price.
+
+### 4.8 Instagram image posts
+
+An Instagram `/p/` post with no video in it fails extraction with `There is no video in this post`.
+That is not a broken extractor — the post is simply an image, and the image is reachable
+anonymously as a thumbnail. Measured 2026-08-07 on `instagram.com/p/DbvWPFQxPkI/`:
+
+| | |
+|---|---|
+| delivered | `1072x1197` JPEG, **191,815 B**, `image2/mjpeg` → `reply_photo` |
+| ceiling | 10 MiB for photos, so ~1.9% of it |
+| cookies | none needed |
+
+Three things here are counter-intuitive and cost time if you re-derive them wrong:
+
+- **`ignore_no_formats_error` does nothing on the download path.** yt-dlp's `dl()` calls
+  `raise_no_formats(info, forced=True)`, and the `forced` arm raises regardless of the flag. It
+  works **only** while extracting with `download=False`. This is why the fallback probes separately
+  instead of folding the flag into `_ydl_options` — which also keeps the video path untouched.
+- **The thumbnail list is not sorted worst-to-best, and an image post's thumbnails carry no
+  dimensions at all** — only `id` and `url`, unlike a reel's, which do have width/height. The 13
+  entries of the reference post run 1149k pixels at index 0, 22k at index 1, climbing to 1283k at
+  index 12: two interleaved ladders, square crops then aspect-correct. So there is nothing to sort
+  by and no reliable "last is best". All thumbnails are downloaded and **the largest file wins**;
+  bytes track pixels for one image re-encoded at one quality.
+- **`duration` and `title` discriminate nothing.** `duration` is `None` for an image post *and* for
+  a working reel, and `title` is `"Video by <author>"` even for an image — Instagram's generic
+  caption. `formats` is the only usable signal.
+
+**A video whose formats fail must stay an error, never its poster frame.** Two halves, both
+verified: `is_image_post()` checks `formats` first and refuses anything that has them; and upstream,
+an auth-walled reel and a bogus shortcode both still raise `DownloadError` even with the flag set,
+so a genuinely broken extraction never reaches the fallback.
+
+**Carousels are refused, not guessed.** yt-dlp models a carousel as a playlist of entries and its
+handling of mixed photo/video ones is an open upstream problem (yt-dlp #7569, #11792). No public
+carousel was available to measure, so a multi-entry info dict returns `False` and the group gets the
+apology. The single-image reference post reports `entries: 0`, so nothing measured is affected.
 
 ---
 
