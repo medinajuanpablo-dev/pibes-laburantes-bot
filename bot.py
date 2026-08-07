@@ -241,6 +241,17 @@ def _ydl_options(target_dir: Path) -> dict:
     return options
 
 
+def _no_formats_ok(target_dir: Path) -> dict:
+    """`_ydl_options` plus tolerance for a post that has no video in it.
+
+    `ignore_no_formats_error` only works while *not* downloading. On the download
+    path yt-dlp calls `raise_no_formats(info, forced=True)`, and the `forced` arm
+    raises whatever the flag says -- so this cannot be folded into the normal
+    options to save a round trip, and the image fallback has to probe separately.
+    """
+    return _ydl_options(target_dir) | {"ignore_no_formats_error": True, "simulate": True}
+
+
 @contextmanager
 def temp_workspace() -> Iterator[Path]:
     """A scratch directory that is removed on the way out, success or failure."""
@@ -262,6 +273,12 @@ def download_into(url: str, target_dir: Path) -> Media:
         with yt_dlp.YoutubeDL(_ydl_options(target_dir)) as ydl:
             info = ydl.extract_info(url, download=True)
     except yt_dlp.utils.DownloadError as exc:
+        # The video path above is untouched: this runs only after it has already
+        # failed. "No video in this post" is not necessarily a failure -- an
+        # Instagram image post lands here and can still be delivered as a photo.
+        image = _image_fallback(url, target_dir)
+        if image is not None:
+            return image
         raise ExtractionError(f"yt-dlp could not download {url}: {exc}") from exc
 
     path = _downloaded_path(info, target_dir)
@@ -289,6 +306,102 @@ def downloaded_media(url: str) -> Iterator[Media]:
     """
     with temp_workspace() as target_dir:
         yield download_into(url, target_dir)
+
+
+def is_image_post(info: dict | None) -> bool:
+    """Whether this is a post with no video in it at all, only still images.
+
+    The whole safety of the image fallback lives in this one function, so it is pure
+    and asserted with plain dicts.
+
+    `formats` is the discriminator, and the empty check comes FIRST on purpose: a post
+    that offers video formats is a video, full stop. If its formats then fail to
+    download, that is an error and the group gets the apology -- it must never
+    degrade into silently sending the poster frame of a video somebody asked for.
+
+    The other half of that guarantee is upstream, in yt-dlp: `ignore_no_formats_error`
+    suppresses only the "No video formats" condition. Measured on 2026-08-07, an
+    auth-walled reel and a bogus shortcode both still raised DownloadError with the
+    flag set, so a failed extraction never reaches this function at all.
+
+    Note what is NOT used here: `duration` is None for the image post AND for a
+    working reel, and `title` is "Video by <author>" even for an image, because that
+    is Instagram's generic caption. Neither discriminates anything.
+    """
+    if not info:
+        return False
+    if info.get("formats"):
+        return False
+    # ponytail: multi-item carousels are refused rather than guessed at. yt-dlp
+    # models a carousel as a playlist of entries and its handling of mixed
+    # photo/video ones is an open upstream problem (yt-dlp issues #7569, #11792).
+    # No public carousel was available to measure on 2026-08-07, so the honest
+    # behaviour is the apology, not an arbitrary slide. The reference image post
+    # reports `entries: 0`, so this costs the measured case nothing. Upgrade path:
+    # find a public carousel, measure what the entries actually look like, and only
+    # then decide whether to send the first slide or all of them.
+    if info.get("entries"):
+        return False
+    return bool(info.get("thumbnails"))
+
+
+def _image_fallback(url: str, target_dir: Path) -> Media | None:
+    """A Media photo if `url` is a post with no video in it, else None.
+
+    Returning None means "not an image post" and the caller re-raises the original
+    download failure, so a broken extraction stays an error and never degrades into
+    a still image.
+    """
+    try:
+        with yt_dlp.YoutubeDL(_no_formats_ok(target_dir)) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError:
+        return None  # extraction is genuinely broken, not merely video-less
+    if not is_image_post(info):
+        return None
+    log.info("%s has no video; sending its image instead", url)
+    return Media(path=_download_best_thumbnail(url, target_dir), has_audio=False)
+
+
+def _download_best_thumbnail(url: str, target_dir: Path) -> Path:
+    """Fetch every thumbnail of an image post and keep the biggest file.
+
+    Deliberately downloads all of them and picks by byte count on disk, because
+    neither cheaper option is sound. Measured on the reference post, 2026-08-07:
+
+      - The thumbnail entries carry NO width/height at all -- only `id` and `url` --
+        so there is nothing to sort by in the metadata. (A reel's thumbnails DO carry
+        dimensions, which is what makes this easy to assume and wrong.)
+      - The list is not ordered worst-to-best. Its 13 entries run 1149k pixels at
+        index 0, then 22k at index 1, climbing to 1283k at index 12: two interleaved
+        ladders, square crops then aspect-correct. Taking the last entry happens to
+        win on this post and is not a property you can rely on.
+
+    Byte size stands in for resolution here: these are the same image re-encoded at
+    one quality, so bytes track pixels (191,815 B = 1072x1197 beats 142,680 B =
+    1072x1072). 13 small requests, once, for a post type that arrives a few times a
+    week -- cheap enough not to out-think.
+    """
+    options = _no_formats_ok(target_dir) | {
+        "simulate": False,
+        "skip_download": True,
+        "writethumbnail": True,
+        "write_all_thumbnails": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as exc:
+        raise ExtractionError(f"yt-dlp could not fetch thumbnails for {url}: {exc}") from exc
+
+    images = [
+        path
+        for path in target_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in PHOTO_SUFFIXES and path.stat().st_size > 0
+    ]
+    if not images:
+        raise ExtractionError(f"{url} has no video and no downloadable image either")
+    return max(images, key=lambda path: path.stat().st_size)
 
 
 def _has_audio(info: dict | None) -> bool:
@@ -607,10 +720,15 @@ def main() -> None:
 # mutation of MEDIA_FORMAT still selects AV1 on this clip, so the assertion that
 # matters stays armed while the run drops from minutes to seconds. The large-file
 # path is covered by plain numbers through delivery_decision instead.
+#
+# Each entry is (url, expected media kind). The kind is asserted, not just recorded:
+# an Instagram image post coming back as a video -- or a reel coming back as its
+# poster frame -- is the failure mode the image fallback can produce.
 SELF_CHECK_URLS = {
-    "youtube": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-    "instagram": "https://www.instagram.com/reel/DbGNFqVKnB-/?igsh=OHFxM3dxdmIzdTQ5",
-    "facebook": "https://www.facebook.com/share/v/1L8yZSLkWq/",
+    "youtube": ("https://www.youtube.com/watch?v=jNQXAC9IVRw", "video"),
+    "instagram reel": ("https://www.instagram.com/reel/DbGNFqVKnB-/?igsh=OHFxM3dxdmIzdTQ5", "video"),
+    "instagram image": ("https://www.instagram.com/p/DbvWPFQxPkI/?igsh=Mnd6dGdxajVzeGV5", "photo"),
+    "facebook": ("https://www.facebook.com/share/v/1L8yZSLkWq/", "video"),
 }
 
 
@@ -737,18 +855,43 @@ def _check_pure_helpers() -> None:
     assert "Traceback" not in message
     print("ok  oversize_reply")
 
+    # is_image_post: the guard that keeps a broken video from becoming a still.
+    thumbs = [{"id": "0", "url": "https://example.com/a.jpg"}]
+    assert is_image_post({"formats": [], "thumbnails": thumbs}), "no formats + thumbnails = image"
+    assert is_image_post({"thumbnails": thumbs}), "a missing formats key is still no formats"
+    # The one that matters: a post that HAS video formats is a video, whatever else
+    # is true of it. If those formats then fail, that is an error, not a poster frame.
+    assert not is_image_post({"formats": [{"format_id": "hd"}], "thumbnails": thumbs}), (
+        "a video whose formats exist must never be treated as an image"
+    )
+    assert not is_image_post({"formats": [], "thumbnails": []}), "no formats and no image = error"
+    # A carousel is unmeasured, so it must fail loudly rather than send a guess.
+    # `entries: 0` is what the measured single-image post reports -- still an image.
+    assert not is_image_post({"formats": [], "thumbnails": thumbs, "entries": [{}, {}]}), (
+        "a multi-item carousel must not be guessed at"
+    )
+    assert is_image_post({"formats": [], "thumbnails": thumbs, "entries": []}), "entries:0 is fine"
+    assert not is_image_post({}), "an empty info dict is not an image post"
+    assert not is_image_post(None), "no info at all is not an image post"
+    # Neither of these discriminates anything -- measured, both are the same for an
+    # image post and for a working reel. Asserted so nobody reaches for them later.
+    assert is_image_post({"formats": [], "thumbnails": thumbs, "duration": None, "title": "Video by x"})
+    assert not is_image_post({"formats": [{"format_id": "1"}], "duration": None, "thumbnails": thumbs})
+    print("ok  is_image_post")
 
-def _probe_container_and_codec(path: Path) -> tuple[str, str]:
-    """Ask ffprobe what the file on disk really is: (container, video codec name).
 
-    ffprobe, not the info dict. The point of this check is to catch a format string
-    that yt-dlp is perfectly happy with and Telegram is not.
+def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
+    """What the file on disk really is: (container, codec, width, height).
+
+    ffprobe, not the info dict. The point of this check is to catch a file that
+    yt-dlp is perfectly happy with and Telegram is not -- and, for a still image, to
+    prove the bytes decode as a picture at all rather than being an error page.
     """
     ffprobe = shutil.which("ffprobe")
     assert ffprobe, "ffprobe not found on PATH (it ships with ffmpeg)"
     result = subprocess.run(
         [ffprobe, "-v", "error", "-of", "json",
-         "-show_entries", "format=format_name:stream=codec_type,codec_name", str(path)],
+         "-show_entries", "format=format_name:stream=codec_type,codec_name,width,height", str(path)],
         capture_output=True,
         text=True,
         check=True,
@@ -758,36 +901,60 @@ def _probe_container_and_codec(path: Path) -> tuple[str, str]:
     container = probed["format"]["format_name"]
     video = [s for s in probed["streams"] if s.get("codec_type") == "video"]
     assert video, f"{path.name}: ffprobe found no video stream"
-    return container, video[0].get("codec_name", "")
+    stream = video[0]
+    return container, stream.get("codec_name", ""), stream.get("width", 0), stream.get("height", 0)
 
 
 def _check_extraction() -> None:
     assert ffmpeg_path(), "ffmpeg not found on PATH -- merged 720p cannot work without it"
     print(f"ok  ffmpeg resolved from PATH at {ffmpeg_path()}")
 
-    for site, url in SELF_CHECK_URLS.items():
+    for site, (url, expected_kind) in SELF_CHECK_URLS.items():
         print(f"..  {site}: downloading {url}")
         with downloaded_media(url) as media:
             assert media.path.is_file(), f"{site}: expected a file at {media.path}"
             size = media.path.stat().st_size
             assert size > 0, f"{site}: downloaded file is empty"
             kind = media_kind(media.path, media.has_audio)
+            assert kind == expected_kind, (
+                f"{site}: expected a {expected_kind}, got a {kind} ({media.path.name}). "
+                f"A reel arriving as its poster frame is exactly what this catches."
+            )
             assert delivery_decision(size, kind) == "file", (
                 f"{site}: {size} bytes is over the {upload_ceiling(kind)}-byte ceiling for {kind}"
             )
 
-            # The property the whole design rests on. Without this the check passes
-            # for a file Telegram delivers as a grey file row instead of a video.
-            container, codec = _probe_container_and_codec(media.path)
-            assert telegram_renders_inline(container, codec), (
-                f"{site}: got {container} / {codec}, which Telegram delivers as a DOCUMENT, "
-                f"not a video. Check MEDIA_FORMAT."
-            )
+            container, codec, width, height = _probe_container_and_codec(media.path)
+            if kind == "video":
+                # The property the whole design rests on. Without this the check
+                # passes for a file Telegram shows as a grey file row, not a video.
+                assert telegram_renders_inline(container, codec), (
+                    f"{site}: got {container} / {codec}, which Telegram delivers as a DOCUMENT, "
+                    f"not a video. Check MEDIA_FORMAT."
+                )
+            else:
+                # For a still, "it decodes and has real dimensions" is the property:
+                # an HTML error page saved as .jpg would fail here.
+                assert width > 0 and height > 0, f"{site}: {container}/{codec} has no dimensions"
+                # And it must be the BEST still, not merely a valid one. Every
+                # thumbnail is still sitting in the temp dir, so compare against
+                # them rather than against a hardcoded resolution Instagram is free
+                # to change. Sorting by filename would pick ".9.jpg" over ".12.jpg".
+                others = [
+                    p for p in media.path.parent.iterdir()
+                    if p.is_file() and p.suffix.lower() in PHOTO_SUFFIXES
+                ]
+                assert len(others) > 1, f"{site}: only {len(others)} thumbnail, nothing was chosen"
+                biggest = max(other.stat().st_size for other in others)
+                assert size == biggest, (
+                    f"{site}: delivered {media.path.name} at {size} B but a larger "
+                    f"thumbnail ({biggest} B) was available -- selection is wrong"
+                )
 
-            extra = video_kwargs(media)
+            extra = video_kwargs(media) if kind == "video" else {}
             print(
                 f"ok  {site}: {media.path.name} {size} bytes, {container.split(',')[0]}/{codec}"
-                f" -> {reply_method_name(kind)} {extra}"
+                f" {width}x{height} -> {reply_method_name(kind)} {extra}"
             )
             workspace = media.path.parent
         assert not workspace.exists(), f"{site}: temp dir {workspace} survived the context manager"
