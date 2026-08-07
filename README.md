@@ -30,6 +30,14 @@ Self-check (no network for the pure helpers, one real YouTube download for the e
 .venv/bin/python bot.py --self-check
 ```
 
+### Optional: `YTDLP_COOKIES`
+
+Set `YTDLP_COOKIES` to the path of a Netscape-format cookie file and the bot passes it to yt-dlp;
+leave it unset and nothing changes. **Instagram in particular is expected to need it** — without
+cookies it answers with an empty media response even for public posts (measured 2026-08-07). Use a
+throwaway account, never your own, and keep the file out of git (`cookies.txt` and `*.cookies.txt`
+are already ignored).
+
 ## BotFather setup — the bot does nothing without this
 
 New bots run in **privacy mode**, where they only see commands aimed at them. A plain link pasted
