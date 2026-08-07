@@ -11,6 +11,7 @@ Run it with `python bot.py`; run its self-check with `python bot.py --self-check
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import os
@@ -139,6 +140,13 @@ REPLY_METHODS = {
 }
 
 FAILURE_REPLY = "no pude bajar ese link"
+
+# `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
+# tests Update.effective_message, which resolves to `edited_message` when that is
+# what arrived, and to `channel_post` for a channel. So editing a typo in a message
+# containing a link would make the bot download and upload the whole video again.
+# filters.UpdateType.MESSAGE narrows it to updates carrying Update.message.
+MESSAGE_FILTER = filters.UpdateType.MESSAGE & (filters.TEXT | filters.CAPTION)
 
 
 class ExtractionError(Exception):
@@ -504,7 +512,7 @@ def main() -> None:
         log.warning("ffmpeg is not on PATH; merged-quality downloads will fail")
     app = Application.builder().token(read_token()).build()
     app.add_handler(CommandHandler("start", on_start))
-    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_message))
+    app.add_handler(MessageHandler(MESSAGE_FILTER, on_message))
     log.info("polling; privacy mode must be OFF for the bot to see plain links (see README.md)")
     app.run_polling()
 
@@ -590,6 +598,25 @@ def _check_pure_helpers() -> None:
     for kind, name in REPLY_METHODS.items():
         assert hasattr(telegram.Message, name), f"telegram.Message has no {name} (for {kind})"
     print("ok  reply_method_name maps onto real telegram.Message methods")
+
+    # The exact filter object main() installs, against updates built by hand.
+    sample = telegram.Message(
+        message_id=1,
+        date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
+        chat=telegram.Chat(id=-100, type=telegram.Chat.GROUP),
+        from_user=telegram.User(id=1, first_name="u", is_bot=False),
+        text="mira https://youtu.be/abc",
+    )
+    assert MESSAGE_FILTER.check_update(telegram.Update(update_id=1, message=sample)), (
+        "a plain new message must be handled"
+    )
+    assert not MESSAGE_FILTER.check_update(telegram.Update(update_id=2, edited_message=sample)), (
+        "an edited message must NOT re-trigger a download"
+    )
+    assert not MESSAGE_FILTER.check_update(telegram.Update(update_id=3, channel_post=sample)), (
+        "a channel post must not be handled"
+    )
+    print("ok  MESSAGE_FILTER ignores edits and channel posts")
 
     # Size fallback, driven by plain numbers -- no huge download involved.
     assert delivery_decision(0, "video") == "file"
