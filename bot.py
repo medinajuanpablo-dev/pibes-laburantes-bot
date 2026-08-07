@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import io
 import json
 import logging
 import os
@@ -20,8 +21,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlparse
@@ -116,6 +118,24 @@ CONNECT_TIMEOUT = 30  # seconds
 
 # Short text replies carry no upload, so a minute is already generous.
 TEXT_REPLY_TIMEOUT = 60  # seconds
+
+# Telegram allows exactly one getUpdates poller per token; a second one makes the
+# loser of the race see HTTP 409 "Conflict: terminated by other getUpdates request".
+# That is a normal event here rather than a bug: run-bot.command hands the bot from
+# one friend to the next, and its "is anybody running?" probe is itself a competing
+# getUpdates call, so a short conflict happens every time somebody merely checks.
+#
+# Two numbers, and the gap between them is the whole design:
+#
+# GRACE is how long a conflict must last before this instance accepts it has lost
+#   the baton. It must outlast a probe. Measured before this change: one competing
+#   call produced conflicts for about ten seconds, so 60 s is six times the blip.
+# EPISODE_GAP is the silence that separates one conflict from the next. It has to be
+#   larger than python-telegram-bot's own retry backoff, which grows by 1.5x and is
+#   capped at 30 s (telegram/ext/_utils/networkloop.py) -- otherwise a long conflict
+#   would look like a series of unrelated new ones and never reach GRACE.
+CONFLICT_GRACE = 60.0  # seconds
+CONFLICT_EPISODE_GAP = 45.0  # seconds
 
 # The three sites the group actually pastes. Anything else is left alone rather than
 # attempted and apologised for -- a bot that answers "no pude bajar ese link" to every
@@ -591,6 +611,32 @@ def oversize_reply(size_bytes: int, link: str) -> str:
     return f"pesa {megabytes:.0f} MB y Telegram no me deja subirlo. Te lo dejo acá: {link}"
 
 
+def conflict_action(
+    now: float, started: float | None, last: float | None
+) -> tuple[str, float | None, float | None]:
+    """Decide what a poll conflict at `now` means, given the episode so far.
+
+    Returns the action and the new (started, last) pair, so the whole rule is one
+    pure function that can be asserted without a network or a second bot:
+
+    * `announce` -- the first conflict of an episode. Say it once.
+    * `quiet`    -- a repeat inside the same episode. python-telegram-bot retries on
+      a growing backoff, so a single competing poller produces a stream of these;
+      logging each one is how the old behaviour became a wall of text.
+    * `give-up`  -- the episode has lasted CONFLICT_GRACE. Somebody really has taken
+      the baton and this instance is no longer receiving anything.
+
+    The episode ends after CONFLICT_EPISODE_GAP of silence. Without that reset, two
+    unrelated probes an hour apart would look like one hour-long conflict and the
+    second one would kill a perfectly healthy bot.
+    """
+    if started is None or last is None or now - last > CONFLICT_EPISODE_GAP:
+        return "announce", now, now
+    if now - started >= CONFLICT_GRACE:
+        return "give-up", None, None
+    return "quiet", started, now
+
+
 # --------------------------------------------------------------------------------
 # The Telegram layer: a thin shell over the pure helpers above.
 # --------------------------------------------------------------------------------
@@ -632,6 +678,55 @@ async def on_message(update: telegram.Update, _context: object) -> None:
         return
     for url in supported:
         await _deliver(message, url)
+
+
+# The current conflict episode: when it began and when it was last seen. Module
+# state because python-telegram-bot hands the error handler nothing to keep it in,
+# and the rule that reads it -- conflict_action -- is pure and tested on its own.
+_conflict_started: float | None = None
+_conflict_last: float | None = None
+
+
+async def on_error(_update: object, context: object) -> None:
+    """Turn a poll-level failure into something the person hosting the bot can act on.
+
+    Registered with Application.add_error_handler. This is not the retry loop the
+    delivery path deliberately does not have: a Conflict has no message to reply to
+    and nothing local to catch it, so the global handler is the only place it can be
+    handled at all. Registering one also stops python-telegram-bot from logging "No
+    error handlers are registered" with a full traceback for every retry -- which,
+    with the launcher's probe, is six lines and three tracebacks for an event that is
+    completely normal.
+
+    Two audiences, one event, so two lines: the log line is English and operational,
+    like every other line in this file, and belongs to whoever reads the log later;
+    the printed line is Spanish, because the person watching this window is a friend
+    hosting the bot for the afternoon, not a developer.
+    """
+    global _conflict_started, _conflict_last
+
+    error = getattr(context, "error", None)
+    if not isinstance(error, telegram.error.Conflict):
+        # Everything else keeps its traceback: it is unexpected, and this is the
+        # only place it will ever be reported.
+        log.exception("unhandled error while polling", exc_info=error)
+        return
+
+    action, _conflict_started, _conflict_last = conflict_action(
+        time.monotonic(), _conflict_started, _conflict_last
+    )
+    if action == "quiet":
+        return
+    if action == "announce":
+        log.warning("another instance has taken the poll; this one is receiving nothing meanwhile")
+        print("Otra persona prendió el bot, así que este dejó de recibir mensajes.")
+        return
+
+    log.warning("the conflict lasted %.0f s; stopping so the window says so", CONFLICT_GRACE)
+    print("El bot ahora lo tiene otra persona. Podés cerrar esta ventana.")
+    application = getattr(context, "application", None)
+    if application is not None:
+        application.stop_running()
 
 
 async def _deliver(message: telegram.Message, url: str) -> None:
@@ -696,14 +791,25 @@ async def _send(message: telegram.Message, kind: str, media: Media) -> None:
     )
 
 
+def build_application(token: str) -> Application:
+    """Wire the handlers onto an Application. Separate from main() so the self-check
+    can assert the wiring: a handler that exists but was never registered is the one
+    failure this file cannot see from the outside, and forgetting add_error_handler
+    would silently restore the wall of tracebacks. Builds nothing over the network."""
+    app = Application.builder().token(token).build()
+    app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(MessageHandler(MESSAGE_FILTER, on_message))
+    app.add_error_handler(on_error)
+    return app
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not ffmpeg_path():
         log.warning("ffmpeg is not on PATH; merged-quality downloads will fail")
-    app = Application.builder().token(read_token()).build()
-    app.add_handler(CommandHandler("start", on_start))
-    app.add_handler(MessageHandler(MESSAGE_FILTER, on_message))
+    app = build_application(read_token())
     log.info("polling; privacy mode must be OFF for the bot to see plain links (see README.md)")
+    log.info("only one instance can poll this token at a time (see README.md: the baton pass)")
     app.run_polling()
 
 
@@ -1086,12 +1192,107 @@ def _check_failure_path() -> None:
     print("ok  _deliver swallows a failing download AND a failing apology")
 
 
+def _check_conflict_handling() -> None:
+    """One line per conflict episode, a clean stop only when it is sustained.
+
+    The whole path except the network: conflict_action is pure, and on_error takes a
+    stand-in context, so both halves are reachable without a second live bot. What is
+    NOT reachable here is python-telegram-bot actually delivering a Conflict to the
+    handler -- that needs two instances and a real token.
+    """
+    # A single probe: the launcher asks Telegram whether anybody is polling, which
+    # costs the running instance a burst of conflicts for about ten seconds. It gets
+    # announced once and must NEVER stop the bot -- otherwise merely asking kills it.
+    started = last = None
+    actions = []
+    for moment in (0.0, 1.0, 2.5, 4.7, 8.1, 10.0):
+        action, started, last = conflict_action(moment, started, last)
+        actions.append(action)
+    assert actions == ["announce", "quiet", "quiet", "quiet", "quiet", "quiet"], actions
+
+    # Quiet again, then somebody probes an hour later: a new episode, not a stop.
+    action, started, last = conflict_action(3600.0, started, last)
+    assert action == "announce", action
+
+    # Somebody has really taken over: conflicts keep arriving on PTB's backoff, which
+    # tops out at 30 s, and after CONFLICT_GRACE this instance gives up.
+    started = last = None
+    moment = 0.0
+    actions = []
+    while moment <= CONFLICT_GRACE + 30.0:
+        action, started, last = conflict_action(moment, started, last)
+        actions.append(action)
+        moment += 25.0  # inside EPISODE_GAP, so it stays one episode
+    assert actions.count("announce") == 1, actions
+    assert "give-up" in actions, actions
+    assert actions.index("give-up") * 25.0 >= CONFLICT_GRACE, actions
+
+    # The handler has to be registered, not merely written. The token below is a
+    # syntactically shaped fake and never leaves this process: building an
+    # Application makes no request.
+    wired = build_application("123456:AAHnot-a-real-token-nothing-is-sent")
+    assert on_error in wired.error_handlers, "main() must register the conflict handler"
+
+    class StopRecordingApplication:
+        def __init__(self) -> None:
+            self.stopped = 0
+
+        def stop_running(self) -> None:
+            self.stopped += 1
+
+    class Context:
+        def __init__(self, error: Exception, application: object) -> None:
+            self.error = error
+            self.application = application
+
+    global _conflict_started, _conflict_last
+    saved = (_conflict_started, _conflict_last)
+    application = StopRecordingApplication()
+    try:
+        _conflict_started = _conflict_last = None
+        with _capture_log(logging.WARNING) as warnings:
+            spoken = io.StringIO()
+            with redirect_stdout(spoken):
+                # Two conflicts back to back are one event, and the bot keeps running.
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+        assert len(warnings) == 1, f"one line per episode, got {warnings}"
+        assert "taken the poll" in warnings[0], warnings
+        # The window is read by a friend, not by a developer.
+        assert spoken.getvalue().count("\n") == 1, spoken.getvalue()
+        assert "Otra persona" in spoken.getvalue(), spoken.getvalue()
+        assert application.stopped == 0, "a burst of conflicts must not stop the bot"
+
+        # A sustained one does stop it, and says so before it goes.
+        _conflict_last = time.monotonic()
+        _conflict_started = _conflict_last - CONFLICT_GRACE - 1.0
+        with _capture_log(logging.WARNING) as warnings:
+            spoken = io.StringIO()
+            with redirect_stdout(spoken):
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+        assert application.stopped == 1, "a sustained conflict must stop the bot"
+        assert len(warnings) == 1, warnings
+        assert "cerrar esta ventana" in spoken.getvalue(), spoken.getvalue()
+
+        # Anything that is not a Conflict keeps its traceback and stops nothing.
+        _conflict_started = _conflict_last = None
+        with _capture_log(logging.ERROR) as errors:
+            asyncio.run(on_error(None, Context(telegram.error.TimedOut(), application)))
+        assert len(errors) == 1, errors
+        assert "unhandled error" in errors[0], errors
+        assert application.stopped == 1, "only a conflict stops the bot"
+    finally:
+        _conflict_started, _conflict_last = saved
+    print("ok  a conflict is one line, and only a sustained one stops the bot")
+
+
 def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
     _check_send_timeouts()
     _check_message_logging()
     _check_failure_path()
+    _check_conflict_handling()
     _check_extraction()
     print("\nself-check passed")
 
