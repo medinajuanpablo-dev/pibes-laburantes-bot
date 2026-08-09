@@ -30,11 +30,15 @@ Telegram update
             ├─ download_into()           yt-dlp, format MEDIA_FORMAT, merged by ffmpeg if needed
             │     └─ on DownloadError → _image_fallback()   is the post merely video-less?
             │            ├─ is_image_post()          no formats + thumbnails + not a carousel
-            │            └─ _download_best_thumbnail()  fetch all, keep the largest file
-            ├─ media_kind()              photo | animation | video, from suffix + presence of audio
+            │            │     └─ _download_best_thumbnail()  fetch all, keep the largest file
+            │            └─ carousel_slides()        every entry an image, 2 or more
+            │                  └─ _download_carousel_slides()  the same rule, per slide
+            ├─ delivery_kind()           album when there are slides, else media_kind()
             ├─ delivery_decision()       real bytes on disk vs the per-kind ceiling
             │     ├─ "file" → _send()        reply_video / reply_photo / reply_animation
+            │     │        → _send_album()   reply_media_group, open files, 2-10 slides
             │     └─ "link" → oversize_reply()  a Spanish message carrying the direct URL
+            ├─ record_rejection()        anything that was not delivered lands in rejected.jsonl
             └─ except → _apologise()     FAILURE_REPLY, with its own timeouts, never re-raises
 ```
 
@@ -54,7 +58,12 @@ token.** That is what makes the self-check possible.
 | `video_kwargs(media)` | `supports_streaming` plus width/height/duration **when known**, never zeros |
 | `telegram_renders_inline(container, codec)` | mp4 container and not AV1 |
 | `is_image_post(info)` | the post has **no** video formats, **has** thumbnails, and is not a carousel |
+| `carousel_slides(info)` | the entries of an all-image carousel of 2+ slides, else `[]` — §4.10 |
+| `delivery_kind(media)` | `album` when it carries slides, else `media_kind` |
+| `delivered_files(media)` | every file this will put in the chat: the slides, or the one file |
 | `oversize_reply(bytes, link)` | the Spanish fallback message |
+| `album_truncation_note(total, sent)` | the Spanish warning for a carousel longer than one album |
+| `rejection_record(...)` / `format_rejections(records)` | one ledger line, and the grouped report — §5.1 |
 | `conflict_action(now, started, last)` | `announce` · `quiet` · `give-up` for a poll conflict — §2.1 |
 
 ---
@@ -118,10 +127,13 @@ still the way the owner runs it, and the launcher is a convenience wrapped aroun
 .venv/bin/python bot.py --self-check
 ```
 
-~25 seconds. 14 assertion groups, then **four real downloads** — YouTube, an Instagram reel, an
-Instagram image post and Facebook — each probed with `ffprobe` to confirm what Telegram will
-actually receive, and each asserted to come back as the *kind* it should be. It exits non-zero on
-the first failure. Run it before every commit, together with `python -m py_compile bot.py`.
+Around a minute. Assertion groups first, then **six real downloads** — YouTube, an Instagram reel,
+an Instagram image post, Facebook, an Instagram image carousel and an Instagram video carousel —
+each probed with `ffprobe` to confirm what Telegram will actually receive, and each asserted to come
+back as the *kind* it should be and in the right number of files. It exits non-zero on the first
+failure. Run it before every commit, together with `python -m py_compile bot.py`.
+
+The carousel is the slow one: 130 thumbnail requests for 10 slides, ~17 s (§4.10).
 
 ---
 
@@ -277,10 +289,7 @@ verified: `is_image_post()` checks `formats` first and refuses anything that has
 an auth-walled reel and a bogus shortcode both still raise `DownloadError` even with the flag set,
 so a genuinely broken extraction never reaches the fallback.
 
-**Carousels are refused, not guessed.** yt-dlp models a carousel as a playlist of entries and its
-handling of mixed photo/video ones is an open upstream problem (yt-dlp #7569, #11792). No public
-carousel was available to measure, so a multi-entry info dict returns `False` and the group gets the
-apology. The single-image reference post reports `entries: 0`, so nothing measured is affected.
+**Carousels of images are albums; anything with a video slide in it is still refused.** See §4.10.
 
 ### 4.9 One poller per token
 
@@ -304,6 +313,53 @@ Not verified without a second live instance: that python-telegram-bot delivers t
 registered error handler at all. The path is asserted from `conflict_action` up to `on_error`, and
 the library's own code says it does (`Application.run_polling` passes an `error_callback` that feeds
 `process_error`), but nobody has watched it happen.
+
+### 4.10 Instagram carousels
+
+A carousel whose slides are **all images** comes back as one Telegram album. Anything with a video
+slide in it does not. Measured 2026-08-09 on `instagram.com/p/DbcsX-BlkZX/`:
+
+| | |
+|---|---|
+| the info dict | `_type: playlist`, no top-level formats, **no top-level thumbnails**, `entries: 10` |
+| each entry | `formats: 0`, `thumbnails: 13` — every slide is an image post, reachable like §4.8 |
+| slide thumbnails | `id` and `url` only. **No width, no height** — same as §4.8, so the same rule: fetch all, biggest file wins |
+| downloaded | 10 slides × 13 thumbnails = 130 files, 6.3 MB, 17.4 s |
+| delivered | the 10 winners, 97 KB – 266 KB each, **1,756,160 B total** |
+
+Four things here are not derivable from the code:
+
+- **The bot's own probe used to see one slide, not ten.** `_ydl_options` sets `playlist_items: "1"`,
+  which is right for the video path and wrong for inspecting a carousel: with the cap the probe
+  returns `entries: 1`, without it `entries: 10`, and `playlist_count: 10` either way. Detection
+  written against a raw `yt-dlp --dump-single-json` would be reading a dict the bot never sees.
+  `_carousel_options` drops the cap; `noplaylist: True` stays, because Instagram returns the
+  carousel as a playlist regardless.
+- **`sendMediaGroup` takes 2–10 items** — "must include 2-10 items", quoted from the Bot API docs on
+  2026-08-09, and matching `telegram.constants.MediaGroupLimit`, which is where the code reads it
+  from. **python-telegram-bot does not enforce either bound**: `send_media_group` only mentions them
+  in its docstring, so an 11-item call fails at Telegram's server, not locally. A longer carousel
+  therefore sends the first 10 **after** a Spanish line saying how many the post really had. Said
+  before the album, not after, so the warning cannot be the message that got lost.
+- **`InputMediaPhoto(Path(...))` silently uploads nothing.** Its `__init__` calls
+  `parse_file_input(..., local_mode=True)` unconditionally — "we don't have access to the actual
+  setting" — so a `Path` or a `str` becomes the literal string `file:///...`, and the request layer
+  only rewrites an `InputMedia` whose `.media` is an `InputFile`. The wire value would be
+  `media: "file:///Users/..."` with zero attached files, which only a local Bot API server accepts.
+  Passing an **open file object** is what produces an `InputFile` and an `attach://` URI. Verified by
+  building the request parameters for all three forms (2026-08-09, PTB 22.8); the self-check asserts
+  the type, because nothing short of the real group would show this.
+- **A video slide anywhere means refuse.** `instagram.com/p/BQ0eAlwhDrw/` is a live all-video
+  carousel — 3 entries, 4 formats and 12 thumbnails each — and it still arrives as a single video
+  through the ordinary path, because the image fallback is only reached once the video download has
+  failed. **Mixed photo/video carousels remain unmeasured**: the one public example named in yt-dlp
+  #7569, `instagram.com/p/CtXtwOop1W5/`, answers "Instagram sent an empty media response" without
+  cookies as of 2026-08-09. They get the apology. Telegram is not the obstacle — its docs restrict
+  only documents and audio to same-type albums — yt-dlp's handling is (#7569, #11792).
+
+**`img_index` in a pasted URL is ignored on purpose.** Instagram writes it from whichever slide the
+sharer was looking at, so reading it as "send this one" is a guess about intent. The album is the
+safe superset. The self-check's carousel URL still carries `img_index=9`, so this stays proven.
 
 ---
 

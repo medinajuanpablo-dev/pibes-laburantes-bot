@@ -17,6 +17,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
 | what breaks in production and how to diagnose it | `README.md` §5 |
 | the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
+| carousels, albums, `sendMediaGroup`'s limits | `README.md` §4.10 |
 | why something was *not* built | `README.md` §6 |
 | how the project got here, and which premises turned out false | `docs/history.md` |
 | the original plan and prompt-order (superseded) | `docs/archive/` |
@@ -78,7 +79,22 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **An image post's thumbnails carry no dimensions, and the list is not sorted worst-to-best.** A
   reel's thumbnails *do* carry width/height, which makes the wrong assumption easy. Selection is by
   downloaded file size for that reason. Also: `duration` and `title` discriminate image from video
-  not at all — `formats` is the only signal.
+  not at all — `formats` is the only signal. A **carousel slide's** thumbnails behave identically,
+  so the album reuses that rule per slide rather than inventing a second one.
+- **`telegram.InputMediaPhoto(Path(...))` uploads nothing.** It turns a `Path` or `str` into the
+  literal string `file:///…`, and the request layer only rewrites an `InputMedia` whose `.media` is
+  an `InputFile`, so the call reaches api.telegram.org with no attached bytes. An **open file
+  object** is what makes it an `InputFile` behind an `attach://` URI. Nothing but the real group
+  would reveal this, so the self-check asserts the type. `README.md` §4.10.
+- **`_ydl_options`' `playlist_items: "1"` hides a carousel from the bot.** With it the fallback
+  probe sees `entries: 1`; without it, all of them. Anything measured with a raw
+  `yt-dlp --dump-single-json` is therefore a different dict from the one the code gets — carousel
+  work goes through `_carousel_options`. `README.md` §4.10.
+- **`carousel_slides`' per-entry `formats` guard cannot be covered live.** It only runs once a video
+  carousel's download has already failed, and no public URL sits in that state. The live all-video
+  carousel in `SELF_CHECK_URLS` proves something weaker — that video carousels still belong to the
+  video path — and it was briefly documented as proving more. Dict asserts are that guard's only
+  cover; do not delete them believing the network entry has it.
 
 ## How to prove a change
 
@@ -99,12 +115,19 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `run_polling` losing `drop_pending_updates` ·
   either `record_rejection` call site in `_deliver` · a ledger write failure escaping · the ledger
   recording the message body · a record written without its line ending · `read_rejections` dying on
-  a half-written line · the report dropping its error-class or host grouping, or hiding the URLs.
-- **The self-check really downloads four times** — YouTube, an Instagram reel, an Instagram image
-  post, Facebook. That is deliberate: extraction rotting is this project's actual failure mode and
-  only a real download detects it. Keep the clips short, and when you change one, verify the codec
-  mutation still goes red on it — a clip that only offers h264 would silently empty that check.
-  Entries are `(url, expected_kind)` and the kind is asserted, so a reel arriving as a still fails.
+  a half-written line · the report dropping its error-class or host grouping, or hiding the URLs ·
+  any of `carousel_slides`' four guards · an album sent as `Path`s instead of open files · the
+  album send dropping `connect_timeout` · `upload_ceiling` holding an album to 50 MiB · `_deliver`
+  sizing an album by its first slide instead of its largest · a truncated carousel sent silently ·
+  album slides picked by list order or delivered out of order · `ALBUM_MAX_ITEMS` not following
+  `telegram.constants.MediaGroupLimit`.
+- **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
+  post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
+  extraction rotting is this project's actual failure mode and only a real download detects it.
+  Keep the clips short, and when you change one, verify the codec mutation still goes red on it — a
+  clip that only offers h264 would silently empty that check. Entries are
+  `(url, expected_kind, expected_files)`; both are asserted, so a reel arriving as a still fails and
+  so does a carousel that loses a slide.
 - **You cannot test the Telegram layer without a token, and you should not try.** No `.env` exists in
   a fresh worktree. Deterministic checks are yours; the live run belongs to whoever holds the token.
   *"I could not test this live"* is the correct note, not a failure.
@@ -117,10 +140,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   Not done because no confirmed case has needed it yet.
 - **The oversize → direct-link path has never run against Telegram.** Nothing in the live session
   exceeded 50 MB. It is covered by asserts and a source read only. Treat it as unproven.
-- **Instagram carousels are refused, not handled.** A multi-item post makes `is_image_post` return
-  `False`, so the group gets the apology. yt-dlp models carousels as playlists and its mixed
-  photo/video handling is an open upstream problem (#7569, #11792); no public carousel was available
-  to measure. Upgrade path: find one, measure the entries, then decide first-slide vs all.
+- **Mixed photo/video Instagram carousels are still refused, and still unmeasured.** All-image ones
+  are albums now (`README.md` §4.10), but the one public mixed example named in yt-dlp #7569 is
+  auth-walled as of 2026-08-09, so a mixed post gets the apology rather than a half-album. Telegram
+  itself would take the mix; yt-dlp is the obstacle (#7569, #11792). Upgrade path: find a live one,
+  check whether its video entries download under `MEDIA_FORMAT`, and only then build it.
+- **A carousel of more than 10 slides has never been seen.** Telegram's album is 2–10 items, and the
+  code caps and announces the cut in Spanish, but no public post has exercised it — Instagram's own
+  carousel was 10 items when the feature launched. The branch is asserted with a stand-in Media.
 - **Nobody has watched python-telegram-bot hand a `Conflict` to `on_error`.** The rule and the
   handler are asserted, and the library's own code routes polling errors to `process_error`, but
   the end-to-end path needs two live instances on the real token.

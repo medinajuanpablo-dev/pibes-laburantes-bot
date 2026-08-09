@@ -42,7 +42,7 @@ into "no pude buscar actualizaciones" and freezes at whatever it had.
 
 ```sh
 .venv/bin/pip install -U yt-dlp          # try it locally first
-.venv/bin/python bot.py --self-check     # four real downloads; this is the test that matters
+.venv/bin/python bot.py --self-check     # six real downloads; this is the test that matters
 # edit requirements.txt to the version you just proved
 git commit -am "Bump yt-dlp to …" && git push
 ```

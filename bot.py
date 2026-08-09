@@ -22,8 +22,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager, redirect_stdout
+from collections.abc import Iterator, Sequence
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlparse
@@ -174,7 +174,21 @@ REPLY_METHODS = {
     "video": "reply_video",
     "photo": "reply_photo",
     "animation": "reply_animation",
+    "album": "reply_media_group",
 }
+
+# Telegram's album size, quoted verbatim from the sendMediaGroup docs on 2026-08-09:
+# "A JSON-serialized Array describing messages to be sent, must include 2-10 items."
+#
+# Taken from python-telegram-bot's own enum rather than typed as 2 and 10, so there
+# is one source of truth and a library bump cannot leave a stale literal here. The
+# self-check asserts the values ARE 2 and 10, so a change is loud instead of silent.
+#
+# python-telegram-bot does NOT enforce either bound: send_media_group only mentions
+# them in its docstring (read at 22.8), so an 11-item call is rejected by Telegram's
+# server, not locally. The cap below is the bot's own, and it has to be.
+ALBUM_MIN_ITEMS = int(telegram.constants.MediaGroupLimit.MIN_MEDIA_LENGTH)
+ALBUM_MAX_ITEMS = int(telegram.constants.MediaGroupLimit.MAX_MEDIA_LENGTH)
 
 FAILURE_REPLY = "no pude bajar ese link"
 
@@ -221,6 +235,13 @@ class Media(NamedTuple):
     width: int | None = None
     height: int | None = None
     duration: float | None = None
+    # An album: every slide of an all-image carousel, in the order they were posted.
+    # Empty for everything else, and `path` stays the first slide so nothing that
+    # reads a single file has to learn about carousels.
+    slides: tuple[Path, ...] = ()
+    # How many slides the post actually had, which is not len(slides) when the post
+    # is longer than an album. The difference is what the group gets told about.
+    slide_total: int = 0
 
 
 def read_token() -> str:
@@ -294,6 +315,23 @@ def _no_formats_ok(target_dir: Path) -> dict:
     options to save a round trip, and the image fallback has to probe separately.
     """
     return _ydl_options(target_dir) | {"ignore_no_formats_error": True, "simulate": True}
+
+
+def _carousel_options(target_dir: Path) -> dict:
+    """`_no_formats_ok` without the one-slide cap. The slides ARE the post.
+
+    `_ydl_options` sets `playlist_items: "1"`, which is right for the video path --
+    a link to a post is a request for that post, not for a playlist. It is wrong
+    while inspecting a carousel: measured on 2026-08-09 against the reference post,
+    the probe returns `entries: 1` with the cap and `entries: 10` without it, while
+    reporting `playlist_count: 10` either way. Detection written against the capped
+    dict would be reading a truth the bot never sees.
+
+    `noplaylist: True` is left in place deliberately: Instagram's extractor returns
+    the carousel as a playlist regardless (measured, same run), so removing it would
+    change nothing here and would loosen the video path's contract for no reason.
+    """
+    return _no_formats_ok(target_dir) | {"playlist_items": None}
 
 
 @contextmanager
@@ -376,35 +414,157 @@ def is_image_post(info: dict | None) -> bool:
         return False
     if info.get("formats"):
         return False
-    # ponytail: multi-item carousels are refused rather than guessed at. yt-dlp
-    # models a carousel as a playlist of entries and its handling of mixed
-    # photo/video ones is an open upstream problem (yt-dlp issues #7569, #11792).
-    # No public carousel was available to measure on 2026-08-07, so the honest
-    # behaviour is the apology, not an arbitrary slide. The reference image post
-    # reports `entries: 0`, so this costs the measured case nothing. Upgrade path:
-    # find a public carousel, measure what the entries actually look like, and only
-    # then decide whether to send the first slide or all of them.
+    # A multi-item carousel is not this: it has no thumbnails of its own, and its
+    # slides live in `entries`. It is handled by carousel_slides() below, and this
+    # function must keep refusing it -- one post, one photo, is the contract the
+    # single-image path is asserted against.
     if info.get("entries"):
         return False
     return bool(info.get("thumbnails"))
 
 
+def carousel_slides(info: dict | None) -> list[dict]:
+    """The entries of an all-image carousel, in order. `[]` for anything else.
+
+    Pure, and the whole safety of the album path lives here, so it is asserted with
+    plain dicts exactly like `is_image_post`. Measured against the reference
+    carousel on 2026-08-09: `_type: playlist`, no top-level formats, no top-level
+    thumbnails, `entries: 10`, and every entry `formats: 0` with `thumbnails: 13`.
+
+    The guards, and why each one is not optional:
+
+    * **Top-level formats mean a video**, same first question as `is_image_post`. A
+      post that offers video formats and then fails to download them is an error;
+      an album of poster frames would be the silent degradation this repo forbids.
+    * **Fewer than two entries is not an album.** Telegram's own floor is 2, and a
+      one-entry playlist is the single-image path, which already works.
+    * **Any entry with formats means a video slide.** Measured on 2026-08-09,
+      `instagram.com/p/BQ0eAlwhDrw/` is a live all-video carousel: 3 entries, each
+      with 4 formats and 12 thumbnails. Sending that as photos would turn three
+      videos into three poster frames. Note this guard only ever runs after the
+      video path has already FAILED on such a post -- while it works, that carousel
+      never reaches the fallback -- which is why the live entry in SELF_CHECK_URLS
+      cannot exercise it and the dict asserts are the only cover it has.
+      ponytail: this refuses the MIXED photo/video carousel as well, which is the
+      case yt-dlp still handles badly upstream (#7569, #11792). The one public
+      example those issues name, `instagram.com/p/CtXtwOop1W5/`, is auth-walled
+      today -- "Instagram sent an empty media response", measured 2026-08-09 -- so a
+      mixed carousel remains unmeasured and the apology is the honest answer.
+      Upgrade path: find a live one, check whether the video entries download under
+      MEDIA_FORMAT, and only then build the mixed album. Telegram itself allows the
+      mix: its sendMediaGroup docs restrict only documents and audio to same-type
+      albums.
+    * **An entry with no thumbnails has nothing to send**, and a hole in the middle
+      of an album is worse than an apology.
+    """
+    if not info:
+        return []
+    if info.get("formats"):
+        return []
+    entries = [entry for entry in (info.get("entries") or ()) if isinstance(entry, dict)]
+    if len(entries) < ALBUM_MIN_ITEMS:
+        return []
+    if any(entry.get("formats") for entry in entries):
+        return []
+    if not all(entry.get("thumbnails") for entry in entries):
+        return []
+    return entries
+
+
 def _image_fallback(url: str, target_dir: Path) -> Media | None:
-    """A Media photo if `url` is a post with no video in it, else None.
+    """A Media photo or album if `url` is a post with no video in it, else None.
 
     Returning None means "not an image post" and the caller re-raises the original
     download failure, so a broken extraction stays an error and never degrades into
     a still image.
+
+    One probe answers both questions -- a single post and a carousel differ only in
+    the same info dict -- so the carousel costs the single-image path no extra round
+    trip. `is_image_post` is asked first and the two are disjoint by construction:
+    it refuses anything with entries, and a carousel needs at least two of them.
     """
     try:
-        with yt_dlp.YoutubeDL(_no_formats_ok(target_dir)) as ydl:
+        with yt_dlp.YoutubeDL(_carousel_options(target_dir)) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError:
         return None  # extraction is genuinely broken, not merely video-less
-    if not is_image_post(info):
+    if is_image_post(info):
+        log.info("%s has no video; sending its image instead", url)
+        return Media(path=_download_best_thumbnail(url, target_dir), has_audio=False)
+    slides = carousel_slides(info)
+    if not slides:
         return None
-    log.info("%s has no video; sending its image instead", url)
-    return Media(path=_download_best_thumbnail(url, target_dir), has_audio=False)
+    log.info("%s is a carousel of %d images; sending them as an album", url, len(slides))
+    # ponytail: `?img_index=N` in the pasted URL is ignored on purpose. Instagram
+    # writes it from whichever slide the sharer happened to be looking at, so
+    # reading it as "send this one" is a guess about intent; the album is the safe
+    # superset and the slide they meant is inside it. The owner's original link
+    # carried img_index=9 and the self-check still uses it, so this stays proven
+    # rather than merely claimed. Upgrade path if the group ever complains that ten
+    # photos are noise: parse img_index and send that single slide, keeping the
+    # album for links that carry no index.
+    paths = _download_carousel_slides(url, target_dir)
+    return Media(
+        path=paths[0],
+        has_audio=False,
+        slides=tuple(paths),
+        slide_total=len(slides),
+    )
+
+
+def _download_carousel_slides(url: str, target_dir: Path) -> list[Path]:
+    """The best image of each carousel slide, in the order they were posted.
+
+    The selection is `_download_best_thumbnail`'s, per slide, and for the same
+    measured reason (§4.8): a carousel entry's thumbnails carry `id` and `url` and
+    nothing else -- no width, no height, no reliable ordering -- so every thumbnail
+    is fetched and the largest file wins. Verified on the reference carousel,
+    2026-08-09: 10 slides x 13 thumbnails = 130 files, 6.3 MB, 17.4 s, and the ten
+    winners are 97 KB to 260 KB.
+
+    ponytail: 130 requests to send 10 images, and ~17 s of a blocked handler
+    (PTB processes updates sequentially). Accepted at ~20 links a week, and the
+    cheap-looking alternative is the one §4.8 already rejected: yt-dlp's own
+    `writethumbnail` picks the last entry of an unordered list. The real upgrade
+    path, if this ever bites, is fetching the slides concurrently -- not trusting
+    the ordering.
+
+    The download is capped at ALBUM_MAX_ITEMS because nothing beyond it can be sent;
+    the caller already knows the true slide count from the probe and tells the group.
+    """
+    options = _carousel_options(target_dir) | {
+        "simulate": False,
+        "skip_download": True,
+        "writethumbnail": True,
+        "write_all_thumbnails": True,
+        "playlist_items": f"1:{ALBUM_MAX_ITEMS}",
+        # "slide-007.12.jpg": the zero-padded playlist index groups and sorts the
+        # slides, and the thumbnail id after it is what yt-dlp appends per image.
+        "outtmpl": str(target_dir / "slide-%(playlist_index)03d.%(ext)s"),
+    }
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as exc:
+        raise ExtractionError(f"yt-dlp could not fetch the carousel of {url}: {exc}") from exc
+
+    groups: dict[str, list[Path]] = {}
+    for path in target_dir.iterdir():
+        if path.is_file() and path.suffix.lower() in PHOTO_SUFFIXES and path.stat().st_size > 0:
+            groups.setdefault(path.name.split(".")[0], []).append(path)
+
+    chosen = []
+    for key in sorted(groups):
+        group = groups[key]
+        best = max(group, key=lambda path: path.stat().st_size)
+        chosen.append(best)
+    if len(chosen) < ALBUM_MIN_ITEMS:
+        # The probe said this was a carousel and the download disagreed. That is an
+        # error, not an album of one -- degrading here would deliver a random slide.
+        raise ExtractionError(
+            f"{url} looked like a carousel but only {len(chosen)} slide(s) came down"
+        )
+    return chosen
 
 
 def _download_best_thumbnail(url: str, target_dir: Path) -> Path:
@@ -573,8 +733,12 @@ def reply_method_name(kind: str) -> str:
 
 
 def upload_ceiling(kind: str) -> int:
-    """Telegram's bot-upload ceiling for this media kind, in bytes."""
-    return TELEGRAM_MAX_PHOTO_UPLOAD if kind == "photo" else TELEGRAM_MAX_UPLOAD
+    """Telegram's bot-upload ceiling for this media kind, in bytes.
+
+    An album's items are photos and are held to the photo ceiling, not the 50 MiB
+    one -- the album is not one 50 MiB upload, it is N photos in one call.
+    """
+    return TELEGRAM_MAX_PHOTO_UPLOAD if kind in ("photo", "album") else TELEGRAM_MAX_UPLOAD
 
 
 def delivery_decision(size_bytes: int, kind: str) -> str:
@@ -629,10 +793,41 @@ def telegram_renders_inline(container: str, video_codec: str) -> bool:
     return "mp4" in containers and "av1" not in video_codec.lower()
 
 
+def delivered_files(media: Media) -> tuple[Path, ...]:
+    """Every file this Media will put in the chat: the album's slides, or the one file."""
+    return media.slides or (media.path,)
+
+
+def delivery_kind(media: Media) -> str:
+    """What this Media is delivered as: "album", or whatever media_kind says.
+
+    Separate from `media_kind` on purpose. `media_kind` answers "what is this file",
+    which for an album slide is honestly "photo"; this answers "what call sends it",
+    and only the Media knows there is more than one file.
+    """
+    if media.slides:
+        return "album"
+    return media_kind(media.path, media.has_audio)
+
+
 def oversize_reply(size_bytes: int, link: str) -> str:
     """The Spanish message sent instead of a file that will not fit."""
     megabytes = size_bytes / 1024 / 1024
     return f"pesa {megabytes:.0f} MB y Telegram no me deja subirlo. Te lo dejo acá: {link}"
+
+
+def album_truncation_note(total: int, sent: int) -> str:
+    """The Spanish warning for a carousel longer than one album.
+
+    A truncated post must never arrive silently: the group has to know a slide is
+    missing, otherwise the bot is quietly lying about what was posted. Said before
+    the album rather than after it, so the warning cannot be the message that got
+    lost.
+    """
+    return (
+        f"el post tiene {total} fotos y Telegram me deja mandar {sent} juntas, "
+        f"así que te mando las primeras {sent}"
+    )
 
 
 def conflict_action(
@@ -905,8 +1100,12 @@ async def _deliver(message: telegram.Message, url: str) -> None:
         with temp_workspace() as workspace:
             # yt-dlp is blocking; keep it off the event loop so the bot stays responsive.
             media = await asyncio.to_thread(download_into, url, workspace)
-            kind = media_kind(media.path, media.has_audio)
-            size = media.path.stat().st_size
+            kind = delivery_kind(media)
+            files = delivered_files(media)
+            # The largest slide decides: Telegram rejects the whole album if one
+            # item is over the ceiling, so measuring only the first would pass a
+            # call that fails.
+            size = max(path.stat().st_size for path in files)
             if delivery_decision(size, kind) == "link":
                 log.info("%s is %d bytes (%s), over the ceiling -- replying with a link", url, size, kind)
                 # A link is not the media, so it counts as a bounce: this is the one
@@ -919,6 +1118,19 @@ async def _deliver(message: telegram.Message, url: str) -> None:
                     f"{size} bytes as {kind}, over the {upload_ceiling(kind)}-byte ceiling",
                 )
                 await _reply_text(message, oversize_reply(size, media.direct_url or url))
+                return
+            if kind == "album":
+                dropped = media.slide_total - len(files)
+                log.info(
+                    "sending %s as an album of %d/%d slides (largest %d bytes)",
+                    url, len(files), media.slide_total, size,
+                )
+                if dropped > 0:
+                    # Before the album, not after: if this reply is the one that
+                    # fails, the group gets the apology instead of a truncated post
+                    # it was never told about.
+                    await _reply_text(message, album_truncation_note(media.slide_total, len(files)))
+                await _send_album(message, files)
                 return
             log.info("sending %s as %s (%d bytes)", url, kind, size)
             await _send(message, kind, media)
@@ -974,6 +1186,42 @@ async def _send(message: telegram.Message, kind: str, media: Media) -> None:
     )
 
 
+def album_media(paths: Sequence[Path], stack: ExitStack) -> list[telegram.InputMediaPhoto]:
+    """The album, as InputMediaPhoto over OPEN FILES. The open file is the point.
+
+    `InputMediaPhoto(Path(...))` looks correct and is not. Read at 22.8, its
+    __init__ calls `parse_file_input(..., local_mode=True)` unconditionally --
+    "we don't have access to the actual setting and want things to work in local
+    mode" -- so a Path or a str becomes the literal string `file:///...`. Nothing
+    downstream repairs it: RequestParameter only rewrites an InputMedia whose
+    `.media` is an InputFile, so the request would carry
+    `media: "file:///Users/..."` and upload zero bytes. api.telegram.org would
+    reject that; only a local Bot API server would not.
+
+    A file object goes down the other branch of `parse_file_input` and becomes an
+    InputFile with an `attach://` URI, which is what actually uploads the picture.
+    The self-check asserts the resulting `.media` is an InputFile, because this is
+    invisible until it reaches the real group and this bot cannot test that.
+
+    The caller owns the ExitStack so the handles close with the send, not before it.
+    """
+    return [
+        telegram.InputMediaPhoto(stack.enter_context(path.open("rb"))) for path in paths
+    ]
+
+
+async def _send_album(message: telegram.Message, paths: Sequence[Path]) -> None:
+    """Send every slide as one Telegram album -- one sendMediaGroup call."""
+    reply = getattr(message, reply_method_name("album"))
+    with ExitStack() as stack:
+        await reply(
+            album_media(paths, stack),
+            connect_timeout=CONNECT_TIMEOUT,
+            write_timeout=UPLOAD_TIMEOUT,
+            read_timeout=UPLOAD_TIMEOUT,
+        )
+
+
 def build_application(token: str) -> Application:
     """Wire the handlers onto an Application. Separate from main() so the self-check
     can assert the wiring: a handler that exists but was never registered is the one
@@ -1020,14 +1268,30 @@ def main() -> None:
 # matters stays armed while the run drops from minutes to seconds. The large-file
 # path is covered by plain numbers through delivery_decision instead.
 #
-# Each entry is (url, expected media kind). The kind is asserted, not just recorded:
-# an Instagram image post coming back as a video -- or a reel coming back as its
-# poster frame -- is the failure mode the image fallback can produce.
+# Each entry is (url, expected media kind, expected file count). The kind is
+# asserted, not just recorded: an Instagram image post coming back as a video -- or
+# a reel coming back as its poster frame -- is the failure mode the image fallback
+# can produce. The count is one for everything that is not an album.
+#
+# The last two are both carousels and they are here for opposite reasons. The image
+# one must come back as a ten-slide album. The video one must keep coming back as a
+# single video: its slides have formats, so the ordinary video path downloads the
+# first one and the image fallback is never reached at all.
+#
+# Be precise about what that second entry proves, because it is easy to overclaim
+# and it was overclaimed here first: it pins that video carousels still belong to
+# the video path, which is the thing a future carousel change is most likely to
+# break. It does NOT exercise carousel_slides' per-entry formats guard -- verified
+# 2026-08-09 by deleting that guard and watching this entry stay green. That guard
+# only ever runs when a video carousel's download has ALREADY failed, which is not
+# a state any public URL can be held in, so it is asserted on dicts only.
 SELF_CHECK_URLS = {
-    "youtube": ("https://www.youtube.com/watch?v=jNQXAC9IVRw", "video"),
-    "instagram reel": ("https://www.instagram.com/reel/DbGNFqVKnB-/?igsh=OHFxM3dxdmIzdTQ5", "video"),
-    "instagram image": ("https://www.instagram.com/p/DbvWPFQxPkI/?igsh=Mnd6dGdxajVzeGV5", "photo"),
-    "facebook": ("https://www.facebook.com/share/v/1L8yZSLkWq/", "video"),
+    "youtube": ("https://www.youtube.com/watch?v=jNQXAC9IVRw", "video", 1),
+    "instagram reel": ("https://www.instagram.com/reel/DbGNFqVKnB-/?igsh=OHFxM3dxdmIzdTQ5", "video", 1),
+    "instagram image": ("https://www.instagram.com/p/DbvWPFQxPkI/?igsh=Mnd6dGdxajVzeGV5", "photo", 1),
+    "facebook": ("https://www.facebook.com/share/v/1L8yZSLkWq/", "video", 1),
+    "instagram carousel": ("https://www.instagram.com/p/DbcsX-BlkZX/?img_index=9", "album", 10),
+    "instagram video carousel": ("https://www.instagram.com/p/BQ0eAlwhDrw/", "video", 1),
 }
 
 
@@ -1178,6 +1442,62 @@ def _check_pure_helpers() -> None:
     assert not is_image_post({"formats": [{"format_id": "1"}], "duration": None, "thumbnails": thumbs})
     print("ok  is_image_post")
 
+    # The album's bounds are Telegram's, taken from PTB's enum. If a library bump
+    # ever moves them, this fails loudly instead of the bot guessing.
+    assert (ALBUM_MIN_ITEMS, ALBUM_MAX_ITEMS) == (2, 10), (ALBUM_MIN_ITEMS, ALBUM_MAX_ITEMS)
+    assert upload_ceiling("album") == TELEGRAM_MAX_PHOTO_UPLOAD, "album items are photos"
+    assert delivery_decision(TELEGRAM_MAX_PHOTO_UPLOAD + 1, "album") == "link"
+    print("ok  album bounds follow telegram.constants.MediaGroupLimit")
+
+    # carousel_slides: the guard that keeps a video carousel from becoming stills.
+    image_entry = {"formats": [], "thumbnails": thumbs}
+    video_entry = {"formats": [{"format_id": "hd"}], "thumbnails": thumbs}
+    ten = [dict(image_entry) for _ in range(10)]
+    assert len(carousel_slides({"formats": [], "entries": ten})) == 10, "ten image slides is an album"
+    assert len(carousel_slides({"entries": [dict(image_entry), dict(image_entry)]})) == 2, "two is the floor"
+    assert carousel_slides({"entries": [dict(image_entry)]}) == [], "one entry is the single-post path"
+    # The one that matters, and it is asserted HERE ONLY: the guard runs only after
+    # a video carousel's download has already failed, and no public URL can be held
+    # in that state. A slide with formats is a video, and three videos must never
+    # become three poster frames. This also covers the unmeasured mixed carousel.
+    assert carousel_slides({"entries": [dict(video_entry) for _ in range(3)]}) == [], (
+        "an all-video carousel must never be delivered as photos"
+    )
+    assert carousel_slides({"entries": [dict(image_entry), dict(video_entry)]}) == [], (
+        "a mixed photo/video carousel is unmeasured and must be refused, not half-sent"
+    )
+    assert carousel_slides({"formats": [{"format_id": "hd"}], "entries": ten}) == [], (
+        "a post with its own video formats is a video, whatever its entries say"
+    )
+    assert carousel_slides({"entries": [dict(image_entry), {"formats": [], "thumbnails": []}]}) == [], (
+        "a slide with no image would be a hole in the middle of the album"
+    )
+    assert carousel_slides({}) == [] and carousel_slides(None) == [], "no info is not a carousel"
+    assert carousel_slides({"formats": [], "thumbnails": thumbs}) == [], "a single image post is not"
+    # is_image_post and carousel_slides must stay disjoint: exactly one of them can
+    # ever claim the same info dict, or the fallback would depend on its own order.
+    for info in ({"formats": [], "thumbnails": thumbs}, {"entries": ten}, {"entries": [image_entry]},
+                 {"formats": [{"format_id": "hd"}]}, {}):
+        assert not (is_image_post(info) and carousel_slides(info)), info
+    print("ok  carousel_slides")
+
+    # delivery_kind and delivered_files: one file or many, one place that decides.
+    photo = Media(Path("a.jpg"), has_audio=False)
+    album = Media(Path("slide-001.12.jpg"), has_audio=False,
+                  slides=(Path("slide-001.12.jpg"), Path("slide-002.12.jpg")), slide_total=2)
+    assert delivery_kind(photo) == "photo" and delivered_files(photo) == (Path("a.jpg"),)
+    assert delivery_kind(Media(Path("c.mp4"), has_audio=True)) == "video"
+    assert delivery_kind(Media(Path("c.mp4"), has_audio=False)) == "animation"
+    assert delivery_kind(album) == "album", "slides make it an album, whatever the suffix says"
+    assert len(delivered_files(album)) == 2
+    assert reply_method_name("album") == "reply_media_group"
+    print("ok  delivery_kind and delivered_files")
+
+    note = album_truncation_note(14, 10)
+    assert "14" in note and "10" in note, note
+    assert "Traceback" not in note and "album" not in note.lower(), note
+    print("ok  album_truncation_note")
+
 
 def _check_rejected_ledger() -> None:
     """The ledger records the bounce, survives junk, and can never break delivery."""
@@ -1320,53 +1640,94 @@ def _check_extraction() -> None:
     assert ffmpeg_path(), "ffmpeg not found on PATH -- merged 720p cannot work without it"
     print(f"ok  ffmpeg resolved from PATH at {ffmpeg_path()}")
 
-    for site, (url, expected_kind) in SELF_CHECK_URLS.items():
+    for site, (url, expected_kind, expected_files) in SELF_CHECK_URLS.items():
         print(f"..  {site}: downloading {url}")
         with downloaded_media(url) as media:
             assert media.path.is_file(), f"{site}: expected a file at {media.path}"
-            size = media.path.stat().st_size
+            kind = delivery_kind(media)
+            files = delivered_files(media)
+            size = max(path.stat().st_size for path in files)
             assert size > 0, f"{site}: downloaded file is empty"
-            kind = media_kind(media.path, media.has_audio)
             assert kind == expected_kind, (
                 f"{site}: expected a {expected_kind}, got a {kind} ({media.path.name}). "
                 f"A reel arriving as its poster frame is exactly what this catches."
+            )
+            assert len(files) == expected_files, (
+                f"{site}: expected {expected_files} file(s), got {len(files)} -- a carousel "
+                f"losing or gaining a slide is a silent lie about what was posted"
             )
             assert delivery_decision(size, kind) == "file", (
                 f"{site}: {size} bytes is over the {upload_ceiling(kind)}-byte ceiling for {kind}"
             )
 
-            container, codec, width, height = _probe_container_and_codec(media.path)
-            if kind == "video":
-                # The property the whole design rests on. Without this the check
-                # passes for a file Telegram shows as a grey file row, not a video.
-                assert telegram_renders_inline(container, codec), (
-                    f"{site}: got {container} / {codec}, which Telegram delivers as a DOCUMENT, "
-                    f"not a video. Check MEDIA_FORMAT."
+            if kind == "album":
+                assert media.slide_total == expected_files, (
+                    f"{site}: slide_total {media.slide_total} != {expected_files}"
+                )
+                assert media.path == files[0], f"{site}: path must be the first slide"
+                assert len(set(files)) == len(files), f"{site}: the same slide twice"
+                # Order is the post's order and the zero-padded names carry it.
+                # Losing it reorders somebody's ten-panel joke.
+                assert list(files) == sorted(files), f"{site}: slides out of order: {files}"
+                for slide in files:
+                    slide_container, _, slide_w, slide_h = _probe_container_and_codec(slide)
+                    assert slide_w > 0 and slide_h > 0, (
+                        f"{site}: {slide.name} is {slide_container} with no dimensions"
+                    )
+                    # Same rule as the single image post, per slide: every
+                    # thumbnail of this slide is still in the temp dir, and the one
+                    # that was picked has to be the biggest of them. Sorting by
+                    # filename would pick ".9.jpg" over ".12.jpg" (§4.8).
+                    stem = slide.name.split(".")[0]
+                    group = [
+                        p for p in slide.parent.iterdir()
+                        if p.is_file() and p.suffix.lower() in PHOTO_SUFFIXES
+                        and p.name.split(".")[0] == stem
+                    ]
+                    assert len(group) > 1, f"{site}: {slide.name} had nothing to choose from"
+                    biggest = max(p.stat().st_size for p in group)
+                    assert slide.stat().st_size == biggest, (
+                        f"{site}: slide {stem} delivered {slide.name} at "
+                        f"{slide.stat().st_size} B but {biggest} B was available"
+                    )
+                print(
+                    f"ok  {site}: {len(files)} slides, "
+                    f"{sum(p.stat().st_size for p in files)} bytes total, largest {size}"
+                    f" -> {reply_method_name(kind)}"
                 )
             else:
-                # For a still, "it decodes and has real dimensions" is the property:
-                # an HTML error page saved as .jpg would fail here.
-                assert width > 0 and height > 0, f"{site}: {container}/{codec} has no dimensions"
-                # And it must be the BEST still, not merely a valid one. Every
-                # thumbnail is still sitting in the temp dir, so compare against
-                # them rather than against a hardcoded resolution Instagram is free
-                # to change. Sorting by filename would pick ".9.jpg" over ".12.jpg".
-                others = [
-                    p for p in media.path.parent.iterdir()
-                    if p.is_file() and p.suffix.lower() in PHOTO_SUFFIXES
-                ]
-                assert len(others) > 1, f"{site}: only {len(others)} thumbnail, nothing was chosen"
-                biggest = max(other.stat().st_size for other in others)
-                assert size == biggest, (
-                    f"{site}: delivered {media.path.name} at {size} B but a larger "
-                    f"thumbnail ({biggest} B) was available -- selection is wrong"
-                )
+                container, codec, width, height = _probe_container_and_codec(media.path)
+                if kind == "video":
+                    # The property the whole design rests on. Without this the check
+                    # passes for a file Telegram shows as a grey file row, not a video.
+                    assert telegram_renders_inline(container, codec), (
+                        f"{site}: got {container} / {codec}, which Telegram delivers as a DOCUMENT, "
+                        f"not a video. Check MEDIA_FORMAT."
+                    )
+                else:
+                    # For a still, "it decodes and has real dimensions" is the property:
+                    # an HTML error page saved as .jpg would fail here.
+                    assert width > 0 and height > 0, f"{site}: {container}/{codec} has no dimensions"
+                    # And it must be the BEST still, not merely a valid one. Every
+                    # thumbnail is still sitting in the temp dir, so compare against
+                    # them rather than against a hardcoded resolution Instagram is free
+                    # to change. Sorting by filename would pick ".9.jpg" over ".12.jpg".
+                    others = [
+                        p for p in media.path.parent.iterdir()
+                        if p.is_file() and p.suffix.lower() in PHOTO_SUFFIXES
+                    ]
+                    assert len(others) > 1, f"{site}: only {len(others)} thumbnail, nothing was chosen"
+                    biggest = max(other.stat().st_size for other in others)
+                    assert size == biggest, (
+                        f"{site}: delivered {media.path.name} at {size} B but a larger "
+                        f"thumbnail ({biggest} B) was available -- selection is wrong"
+                    )
 
-            extra = video_kwargs(media) if kind == "video" else {}
-            print(
-                f"ok  {site}: {media.path.name} {size} bytes, {container.split(',')[0]}/{codec}"
-                f" {width}x{height} -> {reply_method_name(kind)} {extra}"
-            )
+                extra = video_kwargs(media) if kind == "video" else {}
+                print(
+                    f"ok  {site}: {media.path.name} {size} bytes, {container.split(',')[0]}/{codec}"
+                    f" {width}x{height} -> {reply_method_name(kind)} {extra}"
+                )
             workspace = media.path.parent
         assert not workspace.exists(), f"{site}: temp dir {workspace} survived the context manager"
     print("ok  temp directories cleaned up")
@@ -1389,6 +1750,10 @@ def _check_send_timeouts() -> None:
         async def reply_text(self, _text: str, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+        async def reply_media_group(self, media: object, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.media = media
+
     video = CapturingMessage()
     asyncio.run(_send(video, "video", Media(Path("x.mp4"), True, None, 1280, 720, 10.0)))
     assert video.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, video.kwargs
@@ -1399,7 +1764,105 @@ def _check_send_timeouts() -> None:
     asyncio.run(_reply_text(text, "hola"))
     assert text.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, text.kwargs
     assert text.kwargs.get("write_timeout") == TEXT_REPLY_TIMEOUT, text.kwargs
-    print("ok  outbound calls carry an explicit connect_timeout")
+
+    with temp_workspace() as workspace:
+        slides = []
+        for index in (1, 2):
+            slide = workspace / f"slide-00{index}.12.jpg"
+            slide.write_bytes(b"\xff\xd8\xff\xdb" + bytes(index))
+            slides.append(slide)
+        album = CapturingMessage()
+        asyncio.run(_send_album(album, slides))
+        assert album.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, album.kwargs
+        assert album.kwargs.get("write_timeout") == UPLOAD_TIMEOUT, album.kwargs
+        assert album.kwargs.get("read_timeout") == UPLOAD_TIMEOUT, album.kwargs
+        assert len(album.media) == 2, album.media
+
+        # The one that cannot be seen without a real group: InputMediaPhoto given a
+        # Path or a str silently becomes the string "file:///...", uploads nothing,
+        # and api.telegram.org rejects it. Only a file object becomes an InputFile,
+        # which is what puts the bytes on the wire behind an attach:// URI.
+        with ExitStack() as stack:
+            built = album_media(slides, stack)
+            assert all(isinstance(item.media, telegram.InputFile) for item in built), (
+                f"album items must be InputFile, got {[type(i.media).__name__ for i in built]}: "
+                f"a Path here becomes a file:// URI that uploads nothing"
+            )
+        for wrong in (slides[0], str(slides[0])):
+            assert not isinstance(telegram.InputMediaPhoto(wrong).media, telegram.InputFile), (
+                "if PTB ever starts uploading a Path directly, album_media can be simplified"
+            )
+    print("ok  outbound calls carry an explicit connect_timeout, album uploads real bytes")
+
+
+def _check_album_delivery() -> None:
+    """A carousel longer than an album must say so, in Spanish, before it sends.
+
+    Instagram's own carousels are short enough that no public one has more than ten
+    slides to test against, so the truncation branch is driven with a stand-in
+    Media. Everything about it except the slide count is the real _deliver.
+    """
+
+    class AlbumMessage:
+        chat_id = -100123
+        message_id = 3
+
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, object]] = []
+
+        async def reply_text(self, text: str, **_kwargs: object) -> None:
+            self.sent.append(("text", text))
+
+        async def reply_media_group(self, media: object, **_kwargs: object) -> None:
+            self.sent.append(("album", len(media)))  # type: ignore[arg-type]
+
+    def deliver(slide_count: int, total: int, oversized: int | None = None) -> list[tuple[str, object]]:
+        """Run the real _deliver over `slide_count` stand-in slides.
+
+        `oversized` is the 1-based slide to blow past the photo ceiling. Sparse:
+        truncate() sets the byte count without writing 10 MiB.
+        """
+        with temp_workspace() as workspace:
+            slides = []
+            for index in range(1, slide_count + 1):
+                slide = workspace / f"slide-{index:03d}.12.jpg"
+                slide.write_bytes(b"\xff\xd8\xff\xdb" + bytes(index))
+                if index == oversized:
+                    with slide.open("r+b") as handle:
+                        handle.truncate(TELEGRAM_MAX_PHOTO_UPLOAD + 1)
+                slides.append(slide)
+            media = Media(slides[0], has_audio=False, slides=tuple(slides), slide_total=total)
+            real, real_ledger = globals()["download_into"], globals()["REJECTED_LEDGER"]
+            globals()["download_into"] = lambda _url, _dir: media
+            globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+            try:
+                message = AlbumMessage()
+                asyncio.run(_deliver(message, "https://www.instagram.com/p/carousel/"))
+            finally:
+                globals()["download_into"] = real
+                globals()["REJECTED_LEDGER"] = real_ledger
+            return message.sent
+
+    exact = deliver(10, 10)
+    assert exact == [("album", 10)], f"a carousel that fits sends the album and nothing else: {exact}"
+
+    # Telegram rejects the whole call if ONE item is over the ceiling, so the size
+    # question is about the largest slide, not the first. A carousel whose last
+    # slide is the heavy one is the case that catches measuring files[0].
+    heavy = deliver(3, 3, oversized=3)
+    assert len(heavy) == 1 and heavy[0][0] == "text", f"an oversize album must not be sent: {heavy}"
+    assert "no me deja subirlo" in str(heavy[0][1]), heavy
+    print("ok  an album is measured by its largest slide, not its first")
+
+    truncated = deliver(ALBUM_MAX_ITEMS, 14)
+    assert len(truncated) == 2, f"a truncated post owes the group a warning: {truncated}"
+    # The warning goes FIRST. If it went second and failed, the group would be left
+    # with a post that is quietly missing four slides.
+    assert truncated[0][0] == "text" and truncated[1] == ("album", ALBUM_MAX_ITEMS), truncated
+    said = str(truncated[0][1])
+    assert "14" in said and "10" in said, said
+    assert FAILURE_REPLY not in said, "a long carousel is not a failure"
+    print("ok  a carousel longer than an album says so before it sends")
 
 
 @contextmanager
@@ -1647,6 +2110,7 @@ def _self_check() -> None:
     _check_send_timeouts()
     _check_message_logging()
     _check_rejected_ledger()
+    _check_album_delivery()
     _check_failure_path()
     _check_conflict_handling()
     _check_startup_drops_the_backlog()
