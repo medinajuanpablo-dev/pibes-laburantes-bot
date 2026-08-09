@@ -242,12 +242,14 @@ FAILURE_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
      "no pude abrir ese link de facebook: puede que ya no exista o que facebook me esté "
      "frenando. probá de nuevo en un rato"),
     # youtube.com/watch?v=AAAAAAAAAAA and ?v=ZZZZZZZZZZZ, byte-identical for both.
-    # This is the bot's OWN sentence, not yt-dlp's: YouTube says "This video is
-    # unavailable", but that text never survives to here. _image_fallback's probe
-    # runs with ignore_no_formats_error and an unavailable YouTube video comes back
-    # with no formats and 38 thumbnails, so is_image_post() says True, the thumbnail
-    # download finds nothing, and ITS error replaces yt-dlp's. Measured 2026-08-09.
-    (("has no video and no downloadable image either",),
+    # This row used to be keyed on the bot's OWN sentence ("has no video and no
+    # downloadable image either"), because the image fallback's error replaced
+    # yt-dlp's before anything downstream saw it. That defect is fixed and the
+    # extractor's own words now survive, so the row is keyed on them -- re-measured
+    # against the live site on 2026-08-09 after the fix. The old key is deliberately
+    # gone rather than kept "just in case": no measured failure reaches it any more,
+    # and an unreachable row is the thing this table's checks exist to catch.
+    (("[youtube]", "video unavailable"),
      "no encontré nada para bajar en ese link: puede que lo hayan borrado o que sea privado"),
 )
 
@@ -483,16 +485,21 @@ def is_image_post(info: dict | None) -> bool:
     flag set, so on Instagram a failed extraction never reaches this function at all.
 
     That last sentence was written as "a failed extraction never reaches this function
-    at all", full stop, and it does NOT generalise off Instagram. Measured 2026-08-09:
-    an unavailable YouTube video (`watch?v=AAAAAAAAAAA`) does not raise under the flag
-    -- the probe returns no formats and 38 thumbnails, so this function says True, the
-    thumbnail fetch finds nothing downloadable, and the group correctly gets an
-    apology. The outcome is right and the diagnosis is not: yt-dlp's own "This video
-    is unavailable" is thrown away and replaced by _download_best_thumbnail's error,
-    which is what the ledger then records for every failing YouTube link. The cost is
-    38 pointless requests and a less useful ledger line, and fixing it means changing
-    which exception _deliver sees -- deliberately not done here. FAILURE_SIGNATURES
-    keys the YouTube row on the message that actually survives.
+    at all", full stop, and it does NOT generalise off Instagram. Measured 2026-08-09
+    and again 2026-08-09 on this branch: an unavailable YouTube video
+    (`watch?v=AAAAAAAAAAA`) does not raise under the flag -- the probe returns no
+    formats and 38 thumbnails, so THIS FUNCTION SAYS TRUE FOR A FAILED EXTRACTION.
+
+    So this function's answer is provisional off Instagram, and nothing keyed on it
+    may treat it as final. The discrimination it cannot make -- "video-less post" vs
+    "extraction that produced nothing" -- is made one step later, in _image_fallback,
+    by the only signal that is not a guess: whether any of those thumbnails yields an
+    image. None of the 38 does, because YouTube's are synthesised from a URL template
+    rather than extracted, so the fallback declines and the caller re-raises yt-dlp's
+    own "Video unavailable". Do not try to move that decision up here: the metadata
+    an image post and a dead video hand back is the same shape, and every up-front
+    signal available (a `preference` key, a placeholder title, a thumbnail count)
+    would put the WORKING image path at risk to save requests on a failing one.
 
     Note what is NOT used here: `duration` is None for the image post AND for a
     working reel, and `title` is "Video by <author>" even for an image, because that
@@ -564,7 +571,12 @@ def _image_fallback(url: str, target_dir: Path) -> Media | None:
 
     Returning None means "not an image post" and the caller re-raises the original
     download failure, so a broken extraction stays an error and never degrades into
-    a still image.
+    a still image. THREE things return None, and the third is the whole point of the
+    branch below: the probe raising, the post being neither single image nor
+    all-image carousel, and thumbnails that produce no image. Nothing in here may
+    raise an error of its own on the single-image path -- that error would replace
+    the extractor's and the ledger would record the fallback's opinion instead of
+    the cause.
 
     One probe answers both questions -- a single post and a carousel differ only in
     the same info dict -- so the carousel costs the single-image path no extra round
@@ -577,8 +589,22 @@ def _image_fallback(url: str, target_dir: Path) -> Media | None:
     except yt_dlp.utils.DownloadError:
         return None  # extraction is genuinely broken, not merely video-less
     if is_image_post(info):
+        photo = _download_best_thumbnail(url, target_dir)
+        if photo is None:
+            # THE discrimination is_image_post() cannot make from metadata alone.
+            # It answered "no video formats + thumbnails" and that is as far as a
+            # dict can go: an unavailable YouTube video comes back from this same
+            # probe with no formats and 38 SYNTHESISED thumbnail URLs -- built from
+            # a template, never checked, all of them 404 (measured 2026-08-09).
+            # The signal that separates the two is the only one that is not a guess:
+            # thumbnails that yield no image at all. That post never was an image
+            # post, so this is not a new failure to report -- it is the fallback
+            # declining, exactly like the carousel branch below, and returning None
+            # is what lets download_into re-raise the extractor's own words.
+            log.info("%s offered thumbnails but no image; keeping the original failure", url)
+            return None
         log.info("%s has no video; sending its image instead", url)
-        return Media(path=_download_best_thumbnail(url, target_dir), has_audio=False)
+        return Media(path=photo, has_audio=False)
     slides = carousel_slides(info)
     if not slides:
         return None
@@ -655,8 +681,13 @@ def _download_carousel_slides(url: str, target_dir: Path) -> list[Path]:
     return chosen
 
 
-def _download_best_thumbnail(url: str, target_dir: Path) -> Path:
+def _download_best_thumbnail(url: str, target_dir: Path) -> Path | None:
     """Fetch every thumbnail of an image post and keep the biggest file.
+
+    Returns None when not one of them came down. That is not a failure to report:
+    it means the post never was an image post and the caller must fall back to the
+    error that actually happened. Raising here instead is what threw away yt-dlp's
+    diagnosis for every failing YouTube link -- see _image_fallback.
 
     Deliberately downloads all of them and picks by byte count on disk, because
     neither cheaper option is sound. Measured on the reference post, 2026-08-07:
@@ -692,7 +723,7 @@ def _download_best_thumbnail(url: str, target_dir: Path) -> Path:
         if path.is_file() and path.suffix.lower() in PHOTO_SUFFIXES and path.stat().st_size > 0
     ]
     if not images:
-        raise ExtractionError(f"{url} has no video and no downloadable image either")
+        return None
     return max(images, key=lambda path: path.stat().st_size)
 
 
@@ -1798,12 +1829,17 @@ def _check_failure_replies() -> None:
             "ERROR: [instagram:user] nasa: Unable to extract data; please report this "
             "issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the "
             "appropriate issue template.",
+        # Re-measured on this branch after the image fallback stopped replacing
+        # yt-dlp's diagnosis with its own. Before the fix both of these read
+        # "<url> has no video and no downloadable image either" -- the bot's
+        # sentence, identical for every failing YouTube link, and useless to
+        # anybody reading the ledger to find out what YouTube said.
         "youtube, unavailable (A)":
-            "https://www.youtube.com/watch?v=AAAAAAAAAAA has no video and no "
-            "downloadable image either",
+            "yt-dlp could not download https://www.youtube.com/watch?v=AAAAAAAAAAA: "
+            "ERROR: [youtube] AAAAAAAAAAA: Video unavailable",
         "youtube, unavailable (Z)":
-            "https://www.youtube.com/watch?v=ZZZZZZZZZZZ has no video and no "
-            "downloadable image either",
+            "yt-dlp could not download https://www.youtube.com/watch?v=ZZZZZZZZZZZ: "
+            "ERROR: [youtube] ZZZZZZZZZZZ: Video unavailable",
         "facebook, dead post or throttled":
             "yt-dlp could not download https://www.facebook.com/watch/?v=999999999999999: "
             "ERROR: [facebook] 999999999999999: Cannot parse data; please report this "
@@ -1865,6 +1901,13 @@ def _check_failure_replies() -> None:
     assert failure_reply("ERROR: [facebook] 1: Could not parse the data") == FAILURE_REPLY
     # Half a signature is not a signature: the extractor tag alone must not fire.
     assert failure_reply("ERROR: [facebook] 1: Unable to extract data") == FAILURE_REPLY
+    assert failure_reply("ERROR: [youtube] x: Sign in to confirm your age") == FAILURE_REPLY
+    assert failure_reply("ERROR: [Instagram] x: Video unavailable") == FAILURE_REPLY
+    # The bot's own sentence used to be the YouTube key, and it is gone from both the
+    # table and the code. If it ever comes back it must land on the generic apology
+    # rather than quietly inherit a line measured for something else.
+    assert failure_reply("https://www.youtube.com/watch?v=AAAAAAAAAAA has no video and no "
+                         "downloadable image either") == FAILURE_REPLY
 
     # Capitals in yt-dlp's prose change nothing, and neither does colour: a coloured
     # detail classifies exactly like the clean one. Both halves of this order meet here.
@@ -1920,6 +1963,83 @@ def _check_failure_replies() -> None:
     assert replies["instagram, audience-restricted"] not in written[0]["detail"], \
         "the ledger records the raw failure, not the sentence the group was told"
     print("ok  _deliver tells the group the cause and still records the raw detail")
+
+
+def _check_failed_extraction_keeps_its_error() -> None:
+    """A failed extraction reaches the ledger as the EXTRACTOR's words, not the bot's.
+
+    The whole slice, end to end, with the network removed: yt-dlp itself is replaced
+    by a stand-in that raises on the video download, hands the fallback the info dict
+    an unavailable YouTube video really returns (no formats, 38 synthesised
+    thumbnails -- measured 2026-08-09), and writes an image or not depending on the
+    case. Both branches of the discrimination are covered, because a fix that made
+    every image post fail would pass the negative half on its own.
+    """
+    unavailable = "ERROR: [youtube] AAAAAAAAAAA: Video unavailable"
+    dead_youtube = {
+        "formats": [],
+        "thumbnails": [{"id": str(n), "url": f"https://i.ytimg.com/vi/AAAAAAAAAAA/{n}.jpg",
+                        "preference": n - 37} for n in range(38)],
+    }
+
+    def _attempt(workspace: Path, info: dict, image: str | None) -> Media | str:
+        """download_into with yt-dlp stubbed out. Returns the Media or the error text."""
+
+        class _FakeYdl:
+            def __init__(self, options: dict) -> None:
+                self.options = options
+
+            def __enter__(self) -> "_FakeYdl":
+                return self
+
+            def __exit__(self, *_exc: object) -> bool:
+                return False
+
+            def extract_info(self, _url: str, download: bool = False) -> dict:
+                # The thumbnail run is the only one that downloads while skipping the
+                # video; that is the call that either produces an image or does not.
+                if download and self.options.get("skip_download"):
+                    if image is not None:
+                        (workspace / image).write_bytes(b"\xff\xd8\xff" + b"x" * 4000)
+                    return info
+                if download:
+                    raise yt_dlp.utils.DownloadError(unavailable)
+                return info
+
+        class _FakeYtDlp:
+            YoutubeDL = _FakeYdl
+            utils = yt_dlp.utils
+
+        real = globals()["yt_dlp"]
+        globals()["yt_dlp"] = _FakeYtDlp
+        try:
+            return download_into("https://www.youtube.com/watch?v=AAAAAAAAAAA", workspace)
+        except ExtractionError as exc:
+            return str(exc)
+        finally:
+            globals()["yt_dlp"] = real
+
+    with temp_workspace() as workspace:
+        failed = _attempt(workspace, dead_youtube, image=None)
+    assert isinstance(failed, str), f"a dead video must not be delivered as anything: {failed}"
+    assert unavailable in failed, f"the extractor's own words must survive: {failed}"
+    assert "no downloadable image either" not in failed, (
+        f"the fallback's error replaced the extractor's, which is the whole defect: {failed}"
+    )
+    # And it must still be a NAMED failure to the group -- the row that used to be
+    # keyed on the bot's sentence now has to fire on what actually arrives.
+    assert failure_reply(failed) != FAILURE_REPLY, (
+        f"the YouTube row no longer matches what the bot records: {failed}"
+    )
+    assert "puede que" in failure_reply(failed), failure_reply(failed)
+
+    # The other half: a post that really is video-less still becomes a photo. Without
+    # this, "always return None" passes everything above.
+    with temp_workspace() as workspace:
+        delivered = _attempt(workspace, dead_youtube, image="best.jpg")
+    assert isinstance(delivered, Media), f"an image that downloads must still be sent: {delivered}"
+    assert delivered.path.name == "best.jpg" and not delivered.has_audio, delivered
+    print("ok  a failed extraction keeps its own error all the way to the ledger")
 
 
 def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
@@ -2422,6 +2542,7 @@ def _self_check() -> None:
     _check_message_logging()
     _check_rejected_ledger()
     _check_failure_replies()
+    _check_failed_extraction_keeps_its_error()
     _check_album_delivery()
     _check_failure_path()
     _check_conflict_handling()

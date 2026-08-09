@@ -288,7 +288,23 @@ Three things here are counter-intuitive and cost time if you re-derive them wron
 **A video whose formats fail must stay an error, never its poster frame.** Two halves, both
 verified: `is_image_post()` checks `formats` first and refuses anything that has them; and upstream,
 an auth-walled reel and a bogus shortcode both still raise `DownloadError` even with the flag set,
-so a genuinely broken extraction never reaches the fallback.
+so **on Instagram** a genuinely broken extraction never reaches the fallback.
+
+**That last clause is Instagram-only, and it used to be written without the qualifier.** Measured
+2026-08-09 on `youtube.com/watch?v=AAAAAAAAAAA`: YouTube reports an unavailable video through the
+*same* no-formats mechanism the flag suppresses — `raise_no_formats(reason, expected=True)` in the
+extractor — so the probe returns instead of raising, with **0 formats and 38 thumbnails**, and
+`is_image_post()` says yes to a failed extraction. Its answer is therefore *provisional* off
+Instagram, and the fallback finishes the discrimination one step later: those 38 thumbnails are
+synthesised from a URL template (`i.ytimg.com/vi/<id>/…`, each carrying a `preference` key an
+Instagram thumbnail does not have) and every one of them 404s, so **no image comes down, the
+fallback declines, and `download_into` re-raises yt-dlp's own `Video unavailable`** (§5.2).
+
+"Thumbnails that yield no image" is the only sound signal here. Every up-front one measured — the
+`preference` key, the placeholder title `youtube video #<id>`, the thumbnail count — is a property
+of today's yt-dlp or today's YouTube, and keying the *working* image path on any of them would risk
+turning a real image post into an apology in order to save requests on a link that is failing
+anyway. So the ~38 fetches on a dead YouTube link are accepted; only the lost diagnosis was fixed.
 
 **Carousels of images are albums; anything with a video slide in it is still refused.** See §4.10.
 
@@ -436,7 +452,8 @@ matches, and anything it does not recognise is still `no pude bajar ese link`, e
 The table is data and the matcher is logic — adding a failure is adding a row.
 
 Every row below is a signature measured on 2026-08-09 by running `download_into` against the live
-site. **Not** by reading `yt-dlp --simulate`: on YouTube those differ, see the last row.
+site. **Not** by reading `yt-dlp --simulate`: what `download_into` produces is what the bot
+classifies, and only running it proves the two are the same string.
 
 | What happened | Matched on | The group hears |
 |---|---|---|
@@ -444,7 +461,7 @@ site. **Not** by reading `yt-dlp --simulate`: on YouTube those differ, see the l
 | Instagram post gone, private or auth-walled | `instagram sent an empty media response` | *…puede que sea privado o que ya no exista* |
 | An Instagram **profile** URL, not a post | `[instagram:user]` + `unable to extract data` | *ese link es de un perfil…, pasame el del reel o la foto* |
 | Facebook post dead **or** Facebook throttling | `[facebook]` + `cannot parse data` | *…puede que ya no exista o que facebook me esté frenando. probá de nuevo en un rato* |
-| Nothing downloadable at all (in practice: a YouTube video that is deleted or private) | `has no video and no downloadable image either` | *…puede que lo hayan borrado o que sea privado* |
+| A YouTube video that is deleted **or** private | `[youtube]` + `video unavailable` | *…puede que lo hayan borrado o que sea privado* |
 
 **Three of those five hedge, and that is the rule, not a hesitation.** Facebook's `Cannot parse
 data` fires on a perfectly good URL under rate limiting — an earlier agent hit exactly that after
@@ -452,13 +469,17 @@ five self-checks in 25 minutes — so "ese post no existe" would be a confident 
 time. YouTube cannot distinguish deleted from private: `watch?v=AAAAAAAAAAA` and `?v=ZZZZZZZZZZZ`
 produce byte-identical text. A reply may never claim more than its signature carries.
 
-**The last row matches the bot's own sentence, not YouTube's.** YouTube says *This video is
-unavailable*, and that text never survives: `_image_fallback`'s probe runs with
-`ignore_no_formats_error`, an unavailable video comes back with no formats and 38 thumbnails, so
-`is_image_post()` says yes, the thumbnail fetch finds nothing, and **its** error replaces yt-dlp's.
-So the ledger's line for a dead YouTube link is the bot's, and the row is keyed on what actually
-arrives. Costs 38 pointless requests per failing YouTube link; deliberately not fixed here, because
-fixing it means changing which exception `_deliver` sees.
+**The last row used to be keyed on the bot's own sentence, and that was a defect, not a design.**
+Until 2026-08-09 the image fallback answered a dead YouTube link with `has no video and no
+downloadable image either` — its own words, byte-identical for every failing YouTube link — and
+yt-dlp's `Video unavailable` was thrown away before anything downstream saw it, ledger included.
+The fallback now declines instead of raising when its thumbnails yield no image (§4.8), so the
+extractor's diagnosis survives, and the row is keyed on it: `[youtube]` pins it to the host and
+`video unavailable` is the cause. Re-measured against the live site after the fix.
+
+What is **not** fixed is the cost: the fallback still fetches all 38 synthesised thumbnails before
+it can tell they are worthless, so a dead YouTube link still burns ~38 requests. Cutting them needs
+an up-front signal, and §4.8 explains why every candidate would put the working image path at risk.
 
 **These strings are upstream prose and they will drift.** The design makes drift fail safe: a
 reworded message matches no row and the group gets the generic apology, which is where it started.

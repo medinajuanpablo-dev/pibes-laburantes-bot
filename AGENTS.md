@@ -91,13 +91,17 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   probe sees `entries: 1`; without it, all of them. Anything measured with a raw
   `yt-dlp --dump-single-json` is therefore a different dict from the one the code gets — carousel
   work goes through `_carousel_options`. `README.md` §4.10.
-- **A failing YouTube link never reaches the ledger as YouTube's error.** yt-dlp says *This video
-  is unavailable*; `ignore_no_formats_error` does not suppress that on Instagram but **does** let
-  an unavailable YouTube video through the probe with no formats and 38 thumbnails, so
-  `is_image_post()` says yes, the thumbnail fetch finds nothing, and its own error replaces
-  yt-dlp's. The apology is still correct; the diagnosis is lost. `is_image_post`'s docstring said
-  "a failed extraction never reaches this function at all" and that is Instagram-only — measured
-  2026-08-09. Anything keyed on a YouTube error string must be keyed on what survives.
+- **`is_image_post()` says yes to a failed extraction, and off Instagram its answer is
+  provisional.** `ignore_no_formats_error` does not suppress a broken Instagram extraction, but an
+  unavailable YouTube video reports itself through that same no-formats mechanism, so it comes back
+  from the probe with no formats and 38 thumbnails and the function says yes — measured 2026-08-09.
+  Its docstring said "a failed extraction never reaches this function at all"; that was Instagram
+  only. The discrimination it cannot make is finished in `_image_fallback`: **thumbnails that yield
+  no image mean the post never was an image post**, so the fallback returns None and
+  `download_into` re-raises the extractor's own words. Do not move that decision up into
+  `is_image_post` — `README.md` §4.8 lists the up-front signals and why each risks the working
+  image path. Nothing on the single-image fallback path may raise an error of its own; that error
+  would replace the extractor's and the ledger would record the fallback's opinion.
 - **A reply may never claim more than its signature carries, and three of the five cannot.**
   Facebook's `Cannot parse data` also fires on a good URL under rate limiting, and YouTube's
   deleted and private are byte-identical, so those replies offer both readings. `README.md` §5.2.
@@ -122,7 +126,9 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   the apology left unprotected · `MESSAGE_FILTER` → `filters.TEXT | filters.CAPTION` ·
   `delivery_decision` `<=` → `<` · the ignore-logging dropping its rejected URLs or leaking the body ·
   `is_image_post` dropping its `formats` or carousel guard · the thumbnail chosen by list order
-  rather than by size · `main` not registering `on_error` · the conflict handler's `quiet` branch ·
+  rather than by size · the image fallback raising its own error instead of declining when no
+  thumbnail yields an image (that is the lost YouTube diagnosis, and it passes every other check) ·
+  that same branch declining when an image *did* come down (an image post must still be sent) · `main` not registering `on_error` · the conflict handler's `quiet` branch ·
   `CONFLICT_GRACE` set to 0 (a probe would then kill a healthy bot) · the episode reset in
   `conflict_action` · the Spanish line the person at the window reads ·
   `run_polling` losing `drop_pending_updates` ·
@@ -139,6 +145,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   losing its casefold or its strip · an unrecognised failure returning anything but `FAILURE_REPLY`
   · one of the three hedged replies rewritten as a certainty · a `FAILURE_SIGNATURES` marker
   written with a capital (it can then never fire) · a row added that no measured signature reaches
+  · the YouTube row keyed back on the bot's own sentence instead of the extractor's
   · the ledger storing the friendly reply instead of the raw detail.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
@@ -176,10 +183,12 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   on purpose after the TTY theory was refuted (pipe and pseudo-TTY both produced no escapes). The
   strip is unconditional so the cause does not matter; do not gate it on a condition to "fix it
   properly", and do not restart the hunt for a cosmetic defect.
-- **A failing YouTube link's real diagnosis is thrown away before the ledger sees it** (mechanism in
-  the bullet above). Deliberately unfixed: the fix changes which exception `_deliver` sees, which
-  is a delivery-path change, not a message change. Upgrade path: keep the original `DownloadError`
-  when the image fallback raises on a post that never was an image post.
+- **A dead YouTube link still costs ~38 pointless thumbnail requests.** The lost-diagnosis half of
+  this was fixed (bullet above); the cost was not. Cutting it needs a signal available *before* the
+  fetch, and every candidate measured is a property of today's yt-dlp or today's YouTube that would
+  put the working image path at risk to save requests on a link that is already failing
+  (`README.md` §4.8). Not worth it at ~20 links a week. Do not re-open without a signal that cannot
+  misfire on an image post.
 - **Only five failures are named; everything else is still `no pude bajar ese link`.** That is the
   design, not a gap. A row costs a measurement against the live site — never a guess from an issue
   tracker or from what an error "probably" says.
