@@ -334,6 +334,36 @@ their pages without warning, and that is this project's real failure mode.
    `the conflict lasted 60 s` means the handover was real and this instance stopped on purpose.
    §2.1 and §4.9.
 
+### 5.1 The rejected-links ledger
+
+Every supported link that does **not** end in delivered media appends one JSON line to
+`rejected.jsonl`, next to `bot.py`. Gitignored — it is the group's content.
+
+```sh
+.venv/bin/python bot.py --rejected
+```
+
+It groups by error class first, then by host, and lists every URL underneath. That order is the
+diagnosis: the class says what *kind* of thing is going wrong — one rotted extractor looks nothing
+like a run of files over the ceiling — and the host says where, which is usually the fix.
+
+Two things about the records:
+
+- **The message body is never written**, only the URL. Same rule as the ignore-logging in item 2
+  above — this is a private group and the URL is the whole diagnosis.
+- **`error` is the exception class name**, except for a file too big to upload: nothing failed
+  there, so that record carries `OversizeForTelegram` and the byte count. It is deliberately in the
+  ledger because a link reply is not the media, and because that path has still never run against
+  Telegram (§6).
+
+**The ledger fragments across hosts, and that is accepted, not overlooked.** Each friend's machine
+records only the bounces it saw and nothing merges them. At ~20 links a week the owner reading his
+own file, and asking a friend to send theirs when a week is missing, costs less than any sync would.
+The format is append-only lines, so `cat` is the merge. Do not build syncing for this (§6).
+
+A failure to write the ledger is swallowed and logged: it is diagnostics bolted onto the failure
+path, and it may never cost the group its apology.
+
 ---
 
 ## 6. Deliberately not built
@@ -352,6 +382,7 @@ a preference.
 | A local Telegram Bot API server for 2 GB uploads | Compiling tdlib for a ceiling meme-length clips rarely reach. |
 | TikTok support | Not requested, and the IP was blocked when it was probed. |
 | An Instagram throwaway account and cookies | Unnecessary — anonymous extraction works (§4.7). |
+| Syncing the rejected-links ledger between hosts | It fragments by design (§5.1). A server or a shared database for ~20 links a week is exactly the cost this repo refuses; `cat` merges the files when the owner actually wants them merged. |
 | Playlists, channels, a dashboard, accounts, rate limiting | Out of scope, permanently. |
 | A retry loop or a global PTB error handler | The failure path is local and small on purpose (§4.6). |
 | A second Python file | See DESIGN LAW 1 in `AGENTS.md`. |
@@ -373,6 +404,7 @@ docs/history.md           how the project got here: measurements, killed premise
 docs/RUN-STATE.md         the full run log of the 2026-08-07 build session
 docs/archive/             the original plan and prompt-order, superseded, kept for provenance
 .env                      the token. gitignored. never commit it.
+rejected.jsonl            the bounce ledger this machine wrote. gitignored. §5.1
 .venv/                    gitignored, and it also holds the launcher's dependency stamp
 ```
 

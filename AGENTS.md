@@ -16,6 +16,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
 | what breaks in production and how to diagnose it | `README.md` §5 |
+| the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
 | why something was *not* built | `README.md` §6 |
 | how the project got here, and which premises turned out false | `docs/history.md` |
 | the original plan and prompt-order (superseded) | `docs/archive/` |
@@ -47,9 +48,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **A height cap is not a size guarantee.** Portrait video (720x900, 1440x1800) exceeds a 720 height
   cap while being a small file. The only real size guard is the byte count of the finished file, and
   `filesize_approx` is `NA` on two of the three sites, so anything built on the estimate is dead code.
-- **`_apologise()` swallowing its exception is correct — and it is the only place that is.** The
-  failure reply is the last line of defence; if it re-raises, the group gets nothing at all. This
-  happened in production.
+- **Exactly two places swallow an exception, and both are load-bearing.** `_apologise()` is the last
+  line of defence: if it re-raises, the group gets nothing at all, which happened in production.
+  `record_rejection()` is diagnostics bolted onto the failure path: a full disk or a read-only
+  checkout may not cost the group its apology. Anywhere else, a swallow is a bug.
 - **`connect_timeout` must be passed explicitly.** python-telegram-bot defaults it to 5.0 s and only
   substitutes its own default when the caller passes nothing, so `write_timeout` alone does not
   protect an upload.
@@ -94,7 +96,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   rather than by size · `main` not registering `on_error` · the conflict handler's `quiet` branch ·
   `CONFLICT_GRACE` set to 0 (a probe would then kill a healthy bot) · the episode reset in
   `conflict_action` · the Spanish line the person at the window reads ·
-  `run_polling` losing `drop_pending_updates`.
+  `run_polling` losing `drop_pending_updates` ·
+  either `record_rejection` call site in `_deliver` · a ledger write failure escaping · the ledger
+  recording the message body · a record written without its line ending · `read_rejections` dying on
+  a half-written line · the report dropping its error-class or host grouping, or hiding the URLs.
 - **The self-check really downloads four times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook. That is deliberate: extraction rotting is this project's actual failure mode and
   only a real download detects it. Keep the clips short, and when you change one, verify the codec

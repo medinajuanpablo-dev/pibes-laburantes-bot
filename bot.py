@@ -178,6 +178,30 @@ REPLY_METHODS = {
 
 FAILURE_REPLY = "no pude bajar ese link"
 
+# Every supported link that does not end in delivered media is written here, one
+# JSON object per line, so the owner can ask "analizá todos los rebotados" later
+# instead of asking whichever friend was hosting to dig through a lost terminal.
+# Next to bot.py rather than in a config dir: this file IS the bot's directory on
+# every host, and .gitignore keeps the group's content out of git.
+#
+# ponytail: with a rotating host the ledger FRAGMENTS -- each friend's machine
+# records only the bounces it saw, and nothing merges them. That is the accepted
+# ceiling: at ~20 links a week, the owner reading his own file and asking a friend
+# to send theirs costs less than any sync would. Upgrade path, cheapest first:
+# ask each friend to send their rejected.jsonl and concatenate them (the format is
+# append-only lines, so `cat` is the merge); and only if that stops working, move
+# the bot to one always-on host. Not a server, not a database, not a sync loop.
+REJECTED_LEDGER = Path(__file__).resolve().parent / "rejected.jsonl"
+
+# A yt-dlp DownloadError message can be several hundred characters of URL and
+# advice. The first line is the diagnosis; the rest is noise in a ledger.
+REJECTED_DETAIL_LIMIT = 400
+
+# The `error` field of a record is an exception class name wherever there is an
+# exception. The oversize path has none -- nothing failed, the file simply does not
+# fit -- so it gets this token instead, which groups the same way.
+OVERSIZE_ERROR = "OversizeForTelegram"
+
 # `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
 # tests Update.effective_message, which resolves to `edited_message` when that is
 # what arrived, and to `channel_post` for a channel. So editing a typo in a message
@@ -638,6 +662,153 @@ def conflict_action(
 
 
 # --------------------------------------------------------------------------------
+# The rejected-links ledger. Diagnostics, never a dependency of delivery.
+# --------------------------------------------------------------------------------
+
+
+def rejection_record(
+    url: str,
+    error: str,
+    detail: str,
+    chat_id: int | None,
+    message_id: int | None,
+    when: str,
+) -> dict:
+    """One ledger line as a plain dict. Pure, so the shape is asserted without a file.
+
+    What is deliberately NOT in here: the message body. This is a private group and
+    the diagnosis is the URL, exactly like the ignore-logging in on_message. The
+    detail is the error text, truncated -- a yt-dlp error carries the whole login
+    advice and a signed URL, and none of that is worth 800 characters a line.
+    """
+    first_line = (detail or "").strip().splitlines()[0] if (detail or "").strip() else ""
+    if len(first_line) > REJECTED_DETAIL_LIMIT:
+        first_line = first_line[:REJECTED_DETAIL_LIMIT] + "..."
+    return {
+        "when": when,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "url": url,
+        "error": error,
+        "detail": first_line,
+    }
+
+
+def record_rejection(
+    message: telegram.Message, url: str, error: str, detail: str, path: Path | None = None
+) -> None:
+    """Append one record to the ledger. This function may not raise, ever.
+
+    It is diagnostics bolted onto the failure path, so a full disk, a read-only
+    checkout or a permission problem must cost the group nothing: the apology still
+    goes out and delivery is unaffected. That makes this the *second* place in the
+    file that swallows an exception, after _apologise, and for the same reason --
+    there is nothing above it that could do anything with the failure.
+
+    Opened, written and closed per record. Closing is what makes it survive the way
+    this bot actually dies: a friend closing the Terminal window kills the process,
+    and the kernel still owns the buffer of a closed file. No fsync -- that defends
+    against a machine crash, which is not the failure mode here.
+    """
+    try:
+        record = rejection_record(
+            url=url,
+            error=error,
+            detail=detail,
+            chat_id=getattr(message, "chat_id", None),
+            message_id=getattr(message, "message_id", None),
+            when=dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
+        )
+        with (path or REJECTED_LEDGER).open("a", encoding="utf-8") as ledger:
+            ledger.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        log.exception("could not write the rejected-links ledger; delivery is unaffected")
+
+
+def read_rejections(path: Path) -> list[dict]:
+    """Every readable record in the ledger, oldest first.
+
+    Unparseable lines are skipped rather than fatal: the process is killed by a
+    window closing, so a half-written last line is a normal thing to find, not a
+    corrupt file.
+    """
+    if not path.is_file():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def rejection_host(url: str) -> str:
+    """The host a bounced URL points at, for grouping. Never raises on junk."""
+    try:
+        return (urlparse(url).hostname or "?").lower().removeprefix("www.")
+    except ValueError:
+        return "?"
+
+
+def format_rejections(records: list[dict]) -> str:
+    """The --rejected report: grouped by error class, then by host.
+
+    That order on purpose. The error class answers "what kind of thing is going
+    wrong" -- one rotted extractor looks completely different from a run of files
+    over the ceiling -- and the host answers "where", which is the next question and
+    usually the fix. Every record is listed under its group because at ~20 links a
+    week the whole file fits on a screen, and a count with no URLs is not something
+    anybody can act on.
+    """
+    if not records:
+        return "nothing has bounced yet"
+
+    by_error: dict[str, dict[str, list[dict]]] = {}
+    for record in records:
+        error = str(record.get("error") or "?")
+        host = rejection_host(str(record.get("url") or ""))
+        by_error.setdefault(error, {}).setdefault(host, []).append(record)
+
+    stamps = sorted(_readable_stamp(record) for record in records)
+    lines = [f"{len(records)} links bounced, {stamps[0]} to {stamps[-1]}"]
+    for error, hosts in sorted(by_error.items(), key=lambda kv: (-_group_size(kv[1]), kv[0])):
+        lines.append("")
+        lines.append(f"{error} -- {_group_size(hosts)}")
+        for host, entries in sorted(hosts.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            lines.append(f"  {host} -- {len(entries)}")
+            for record in sorted(entries, key=lambda r: str(r.get("when") or "")):
+                lines.append(f"    {_readable_stamp(record)}  {record.get('url')}")
+                detail = str(record.get("detail") or "").strip()
+                if detail:
+                    lines.append(f"        {detail[:160]}")
+    return "\n".join(lines)
+
+
+def _group_size(hosts: dict[str, list[dict]]) -> int:
+    return sum(len(entries) for entries in hosts.values())
+
+
+def _readable_stamp(record: dict) -> str:
+    """"2026-08-09T16:31:00-03:00" -> "2026-08-09 16:31". The offset stays in the file."""
+    return str(record.get("when") or "?")[:16].replace("T", " ")
+
+
+def print_rejections() -> None:
+    """`python bot.py --rejected`. The command the owner runs before asking for an
+    analysis, so it explains its own scope: this file is one machine's memory."""
+    records = read_rejections(REJECTED_LEDGER)
+    print(format_rejections(records))
+    print()
+    print(f"({REJECTED_LEDGER} -- only what this machine saw; the host rotates)")
+
+
+# --------------------------------------------------------------------------------
 # The Telegram layer: a thin shell over the pure helpers above.
 # --------------------------------------------------------------------------------
 
@@ -738,13 +909,25 @@ async def _deliver(message: telegram.Message, url: str) -> None:
             size = media.path.stat().st_size
             if delivery_decision(size, kind) == "link":
                 log.info("%s is %d bytes (%s), over the ceiling -- replying with a link", url, size, kind)
+                # A link is not the media, so it counts as a bounce: this is the one
+                # delivery path that has never run against Telegram (README.md §6),
+                # and the ledger is how it stops being invisible.
+                record_rejection(
+                    message,
+                    url,
+                    OVERSIZE_ERROR,
+                    f"{size} bytes as {kind}, over the {upload_ceiling(kind)}-byte ceiling",
+                )
                 await _reply_text(message, oversize_reply(size, media.direct_url or url))
                 return
             log.info("sending %s as %s (%d bytes)", url, kind, size)
             await _send(message, kind, media)
-    except Exception:
+    except Exception as exc:
         # Never a stack trace in the group. The real error goes to the log.
         log.exception("failed to deliver %s", url)
+        # Written before the apology so a network bad enough to kill both still
+        # leaves the diagnosis behind. It cannot raise, so it cannot cost the apology.
+        record_rejection(message, url, type(exc).__name__, str(exc))
         await _apologise(message)
 
 
@@ -996,6 +1179,118 @@ def _check_pure_helpers() -> None:
     print("ok  is_image_post")
 
 
+def _check_rejected_ledger() -> None:
+    """The ledger records the bounce, survives junk, and can never break delivery."""
+    # Record building: the shape, the truncation, and what must NOT be in it.
+    record = rejection_record(
+        url="https://www.instagram.com/p/x/",
+        error="DownloadError",
+        detail="ERROR: [Instagram] x: No video formats found!\nsecond line is noise",
+        chat_id=-100123,
+        message_id=7,
+        when="2026-08-09T16:31:00-03:00",
+    )
+    assert set(record) == {"when", "chat_id", "message_id", "url", "error", "detail"}, record
+    assert record["detail"] == "ERROR: [Instagram] x: No video formats found!", record
+    assert record["chat_id"] == -100123 and record["message_id"] == 7, record
+    huge = rejection_record("u", "E", "x" * 5000, 1, 1, "w")
+    assert len(huge["detail"]) == REJECTED_DETAIL_LIMIT + 3, len(huge["detail"])
+    assert rejection_record("u", "E", "", 1, 1, "w")["detail"] == ""
+    print("ok  rejection_record")
+
+    class StubMessage:
+        chat_id = -100123
+        message_id = 7
+        text = "miren esto SECRETO-DEL-GRUPO https://youtu.be/abc"
+
+    with temp_workspace() as workspace:
+        ledger = workspace / "rejected.jsonl"
+        record_rejection(StubMessage(), "https://youtu.be/abc", "DownloadError", "boom", ledger)
+        record_rejection(StubMessage(), "https://www.instagram.com/p/x/", "TimedOut", "slow", ledger)
+        # Read with a fresh handle: if the writer kept the file open and unflushed,
+        # this is what a killed process would have lost.
+        raw = ledger.read_text(encoding="utf-8")
+        assert raw.count("\n") == 2, f"one flushed line per record: {raw!r}"
+        assert "SECRETO-DEL-GRUPO" not in raw, "the message body must never reach the ledger"
+        records = read_rejections(ledger)
+        assert len(records) == 2, records
+        assert records[0]["error"] == "DownloadError" and records[1]["error"] == "TimedOut"
+
+        # A process killed mid-write leaves a half line. That is normal, not corrupt.
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write('{"when": "2026-08-09T1')
+        assert len(read_rejections(ledger)) == 2, "a truncated last line must be skipped"
+        assert read_rejections(workspace / "nope.jsonl") == [], "a missing ledger is empty, not fatal"
+
+        # Diagnostics may never break delivery: a ledger path that cannot be written
+        # has to be swallowed. A directory is the cheapest unwritable path there is.
+        blocked = workspace / "a-directory"
+        blocked.mkdir()
+        with _capture_log(logging.ERROR) as errors:
+            record_rejection(StubMessage(), "https://youtu.be/abc", "DownloadError", "boom", blocked)
+        assert len(errors) == 1 and "ledger" in errors[0], errors
+    print("ok  record_rejection appends, flushes, hides the body and never raises")
+
+    # A file too big to upload is a bounce too: the group got a link, not the media.
+    # That path has never run against Telegram (README.md §6), so the ledger is the
+    # only thing that will ever tell the owner it happened. The oversized file is
+    # sparse -- truncate() sets the byte count the ceiling is compared against
+    # without writing 10 MiB.
+    class LinkRecordingMessage:
+        chat_id = -100123
+        message_id = 9
+
+        def __init__(self) -> None:
+            self.said = ""
+
+        async def reply_text(self, text: str, **_kwargs: object) -> None:
+            self.said = text
+
+    with temp_workspace() as workspace:
+        huge = workspace / "huge.jpg"
+        with huge.open("wb") as handle:
+            handle.truncate(TELEGRAM_MAX_PHOTO_UPLOAD + 1)
+        ledger = workspace / "rejected.jsonl"
+        real_download, real_ledger = globals()["download_into"], globals()["REJECTED_LEDGER"]
+        globals()["download_into"] = lambda _url, _dir: Media(huge, has_audio=False)
+        globals()["REJECTED_LEDGER"] = ledger
+        try:
+            message = LinkRecordingMessage()
+            asyncio.run(_deliver(message, "https://www.instagram.com/p/big/"))
+        finally:
+            globals()["download_into"] = real_download
+            globals()["REJECTED_LEDGER"] = real_ledger
+        assert "no me deja subirlo" in message.said, message.said
+        assert FAILURE_REPLY not in message.said, "an oversize file is not a failure to the group"
+        oversized = read_rejections(ledger)
+        assert len(oversized) == 1, oversized
+        assert oversized[0]["error"] == OVERSIZE_ERROR, oversized
+        assert str(TELEGRAM_MAX_PHOTO_UPLOAD + 1) in oversized[0]["detail"], oversized
+    print("ok  an oversize link reply is recorded as a bounce too")
+
+    # The report: grouped by error class, then by host, every URL visible.
+    assert format_rejections([]) == "nothing has bounced yet"
+    report = format_rejections([
+        rejection_record("https://www.instagram.com/p/a/", "DownloadError", "no formats", 1, 1,
+                         "2026-08-07T10:00:00-03:00"),
+        rejection_record("https://www.instagram.com/p/b/", "DownloadError", "no formats", 1, 2,
+                         "2026-08-08T11:00:00-03:00"),
+        rejection_record("https://youtu.be/c", "TimedOut", "upload died", 1, 3,
+                         "2026-08-09T12:00:00-03:00"),
+    ])
+    assert report.startswith("3 links bounced, 2026-08-07 10:00 to 2026-08-09 12:00"), report
+    assert "DownloadError -- 2" in report and "TimedOut -- 1" in report, report
+    assert "  instagram.com -- 2" in report and "  youtu.be -- 1" in report, report
+    # The biggest group first: a pattern has to be visible without counting.
+    assert report.index("DownloadError") < report.index("TimedOut"), report
+    for url in ("https://www.instagram.com/p/a/", "https://www.instagram.com/p/b/", "https://youtu.be/c"):
+        assert url in report, f"{url} missing from the report"
+    assert "no formats" in report, "the error text is the diagnosis"
+    # Junk in the file must not crash the report the owner runs.
+    assert format_rejections([{}, {"url": "not a url", "error": None}]), "junk records must render"
+    print("ok  format_rejections groups by error class, then host")
+
+
 def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
     """What the file on disk really is: (container, codec, width, height).
 
@@ -1172,6 +1467,10 @@ def _check_failure_path() -> None:
     """
 
     class ExplodingMessage:
+        chat_id = -100123
+        message_id = 42
+        text = "miren esto SECRETO-DEL-GRUPO https://youtu.be/never-fetched"
+
         def __init__(self) -> None:
             self.attempts = 0
 
@@ -1183,23 +1482,36 @@ def _check_failure_path() -> None:
         raise ExtractionError("simulated extractor failure")
 
     real_download = globals()["download_into"]
+    real_ledger = globals()["REJECTED_LEDGER"]
     globals()["download_into"] = _exploding_download
-    try:
-        message = ExplodingMessage()
-        # Both failures here are deliberate, so _capture_log also keeps their
-        # tracebacks out of the self-check's output -- asserted on below, not ignored.
-        with _capture_log(logging.ERROR) as errors:
-            # If this raises, _deliver's except block is not a net and the group gets
-            # nothing -- the exact live failure this guards against.
-            asyncio.run(_deliver(message, "https://youtu.be/never-fetched"))
-    finally:
-        globals()["download_into"] = real_download
+    with temp_workspace() as workspace:
+        globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+        try:
+            message = ExplodingMessage()
+            # Both failures here are deliberate, so _capture_log also keeps their
+            # tracebacks out of the self-check's output -- asserted on below, not ignored.
+            with _capture_log(logging.ERROR) as errors:
+                # If this raises, _deliver's except block is not a net and the group gets
+                # nothing -- the exact live failure this guards against.
+                asyncio.run(_deliver(message, "https://youtu.be/never-fetched"))
+            written = read_rejections(globals()["REJECTED_LEDGER"])
+            raw = globals()["REJECTED_LEDGER"].read_text(encoding="utf-8")
+        finally:
+            globals()["download_into"] = real_download
+            globals()["REJECTED_LEDGER"] = real_ledger
 
     assert message.attempts == 1, f"the apology must be attempted exactly once, got {message.attempts}"
     assert len(errors) == 2, f"both failures must be logged, got {errors}"
     assert any("failed to deliver" in m for m in errors), errors
     assert any("got nothing" in m for m in errors), errors
-    print("ok  _deliver swallows a failing download AND a failing apology")
+    # The bounce is written down even when the apology itself dies -- that pair is
+    # exactly the case nobody was around to see, and the whole point of the ledger.
+    assert len(written) == 1, f"the failure must land in the ledger: {written}"
+    assert written[0]["url"] == "https://youtu.be/never-fetched", written
+    assert written[0]["error"] == "ExtractionError", written
+    assert written[0]["message_id"] == 42 and written[0]["chat_id"] == -100123, written
+    assert "SECRETO-DEL-GRUPO" not in raw, "the message body must never reach the ledger"
+    print("ok  _deliver swallows a failing download AND a failing apology, and records it")
 
 
 def _check_conflict_handling() -> None:
@@ -1334,6 +1646,7 @@ def _self_check() -> None:
     _check_pure_helpers()
     _check_send_timeouts()
     _check_message_logging()
+    _check_rejected_ledger()
     _check_failure_path()
     _check_conflict_handling()
     _check_startup_drops_the_backlog()
@@ -1344,5 +1657,7 @@ def _self_check() -> None:
 if __name__ == "__main__":
     if "--self-check" in sys.argv[1:]:
         _self_check()
+    elif "--rejected" in sys.argv[1:]:
+        print_rejections()
     else:
         main()
