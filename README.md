@@ -24,7 +24,8 @@ Long-polling client, not a server. No inbound port, no webhook, no TLS to manage
 Telegram update
   └─ on_message                    filters: real messages only, text or caption
        ├─ find_urls(text)          regex, http(s):// required
-       ├─ is_supported(url)        host allow-list; everything else ignored (and logged)
+       ├─ is_supported(url)        host allow-list; everything else is logged AND
+       │                           written to the ledger as UnsupportedHost
        └─ _deliver(url)
             ├─ temp_workspace()          mkdtemp, removed in a finally
             ├─ download_into()           yt-dlp, format MEDIA_FORMAT, merged by ffmpeg if needed
@@ -394,6 +395,8 @@ their pages without warning, and that is this project's real failure mode.
      letting Telegram decide what a link is.
    - `message N: 2 URL(s) found, none on a supported host -- rejected: …` — the URLs are printed
      because they are the entire diagnosis. Add the host to `SUPPORTED_HOSTS` if it belongs there.
+     These also go in the ledger under `UnsupportedHost` (§5.1), so the question survives the
+     window being closed: `bot.py --rejected` answers "what has this group been pasting".
 3. **The bot stops seeing anything in a group** → it was probably demoted from administrator. See §3.
 4. **YouTube fails with missing formats** → the first suspect is the warning yt-dlp prints on every
    extraction: *"No supported JavaScript runtime could be found… extraction without a JS runtime has
@@ -409,12 +412,27 @@ their pages without warning, and that is this project's real failure mode.
 
 ### 5.1 The rejected-links ledger
 
-Every supported link that does **not** end in delivered media appends one JSON line to
-`rejected.jsonl`, next to `bot.py`. Gitignored — it is the group's content.
+Every link that does **not** end in delivered media appends one JSON line to `rejected.jsonl`, next
+to `bot.py`. Gitignored — it is the group's content.
 
 ```sh
 .venv/bin/python bot.py --rejected
 ```
+
+**Two piles, and the error class is what keeps them apart.** A *bounce* is a supported link the bot
+tried and failed on — something rotted, and the fix is usually a yt-dlp bump. An *unattempted* link
+is a URL on a host that is not in `SUPPORTED_HOSTS`: nothing failed, the bot simply does not know
+that site, and the fix is deciding whether to support it. They read as different groups in the
+report because they lead to different actions, and the second pile is the one that drives the
+roadmap — "the group pasted TikTok eight times this week" is the evidence that decides what to
+build next, and it used to evaporate with the terminal window.
+
+Unattempted records carry `error: "UnsupportedHost"` and an empty `detail`: nothing was attempted,
+so there is no error text, and the class plus the URL are the whole record. **Every** URL of such a
+message is recorded, not just the first — which site recurs is the entire point. Two things are
+deliberately *not* recorded: a message with no URL in it (ordinary chat, and it would bury the
+signal), and the skipped links of a message that also carried a supported one (something *was*
+attempted there, so calling it unattempted would be false).
 
 It groups by error class first, then by host, and lists every URL underneath. That order is the
 diagnosis: the class says what *kind* of thing is going wrong — one rotted extractor looks nothing
@@ -424,10 +442,10 @@ Three things about the records:
 
 - **The message body is never written**, only the URL. Same rule as the ignore-logging in item 2
   above — this is a private group and the URL is the whole diagnosis.
-- **`error` is the exception class name**, except for a file too big to upload: nothing failed
-  there, so that record carries `OversizeForTelegram` and the byte count. It is deliberately in the
-  ledger because a link reply is not the media, and because that path has still never run against
-  Telegram (§6).
+- **`error` is the exception class name**, except for the two paths where nothing raised. A file too
+  big to upload carries `OversizeForTelegram` and the byte count — deliberately in the ledger
+  because a link reply is not the media, and because that path has still never run against Telegram
+  (§6). A link on an unknown host carries `UnsupportedHost`.
 - **`detail` is the raw failure text with terminal colour codes stripped**, and it stays raw
   whatever the group was told — §5.2 changes the chat message, never the record. The strip is there
   because one live record from 2026-08-09 carries yt-dlp's red `ERROR:` as the literal bytes
@@ -438,7 +456,7 @@ Three things about the records:
   check would be a fix behind the wrong condition.
 
 **The ledger fragments across hosts, and that is accepted, not overlooked.** Each friend's machine
-records only the bounces it saw and nothing merges them. At ~20 links a week the owner reading his
+records only what it saw and nothing merges them. At ~20 links a week the owner reading his
 own file, and asking a friend to send theirs when a week is missing, costs less than any sync would.
 The format is append-only lines, so `cat` is the merge. Do not build syncing for this (§6).
 

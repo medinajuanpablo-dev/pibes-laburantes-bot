@@ -133,7 +133,9 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `conflict_action` · the Spanish line the person at the window reads ·
   `run_polling` losing `drop_pending_updates` ·
   either `record_rejection` call site in `_deliver` · a ledger write failure escaping · the ledger
-  recording the message body · a record written without its line ending · `read_rejections` dying on
+  recording the message body · `on_message` not recording an unsupported host at all, recording only
+  the first of its URLs, or sharing a real failure's error class · a message with no URL, or a mixed
+  message whose supported link WAS attempted, recorded as unattempted · a record written without its line ending · `read_rejections` dying on
   a half-written line · the report dropping its error-class or host grouping, or hiding the URLs ·
   any of `carousel_slides`' four guards · an album sent as `Path`s instead of open files · the
   album send dropping `connect_timeout` · `upload_ceiling` holding an album to 50 MiB · `_deliver`
@@ -154,6 +156,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   clip that only offers h264 would silently empty that check. Entries are
   `(url, expected_kind, expected_files)`; both are asserted, so a reel arriving as a still fails and
   so does a carousel that loses a slide.
+- **Any check that reaches `on_message` or `_deliver` must swap `REJECTED_LEDGER` first.** Both
+  write to it now — the unsupported-host path fires on a plain text message — and a self-check that
+  forgets leaves invented links in the owner's real `rejected.jsonl`, which is the file he reads to
+  decide what to build. Swap the module global and restore it in a `finally`, like every other
+  check here does.
 - **You cannot test the Telegram layer without a token, and you should not try.** No `.env` exists in
   a fresh worktree. Deterministic checks are yours; the live run belongs to whoever holds the token.
   *"I could not test this live"* is the correct note, not a failure.

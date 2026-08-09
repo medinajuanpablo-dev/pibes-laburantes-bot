@@ -294,6 +294,16 @@ ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;:?]*[ -/]*[@-~]")
 # fit -- so it gets this token instead, which groups the same way.
 OVERSIZE_ERROR = "OversizeForTelegram"
 
+# And this one is for a link the bot never even tried: the host is not in
+# SUPPORTED_HOSTS. It has to be its own class rather than share one with a real
+# failure, because the two lead to opposite actions -- a bounce means something
+# rotted and needs fixing, an unattempted link means the group keeps pasting a site
+# the bot does not know, and the fix is deciding whether to support it. Grouped
+# separately by format_rejections, which is the whole point: "the group pasted
+# TikTok eight times this week" is the one signal that decides what to build next,
+# and until now it lived only in a runtime log that dies with the terminal window.
+UNSUPPORTED_ERROR = "UnsupportedHost"
+
 # `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
 # tests Update.effective_message, which resolves to `edited_message` when that is
 # what arrived, and to `channel_post` for a channel. So editing a typo in a message
@@ -1029,6 +1039,11 @@ def rejection_record(
 
     Colour codes are stripped before the truncation, not after, so the 400 characters
     are 400 characters of diagnosis rather than of escape sequence.
+
+    An empty `detail` is legitimate and stays empty: an unsupported host has no error
+    text because nothing was attempted, and the class plus the URL are the whole
+    record. format_rejections prints no detail line for those rather than a constant
+    sentence repeated under every URL.
     """
     detail = strip_ansi(detail)
     first_line = detail.strip().splitlines()[0] if detail.strip() else ""
@@ -1180,6 +1195,12 @@ async def on_message(update: telegram.Update, _context: object) -> None:
 
     The rejected URLs go in the log because they are the entire diagnosis. The
     message body does not: this is a private group.
+
+    They also go in the ledger, under their own error class. The log answers "why
+    did nothing happen just now" for whoever is watching the window; the ledger
+    answers "what has this group been pasting that I do not support", which is a
+    question nobody can ask a terminal that has been closed. Same privacy rule in
+    both places: the URLs, never the body.
     """
     message = update.effective_message
     if message is None:
@@ -1196,6 +1217,18 @@ async def on_message(update: telegram.Update, _context: object) -> None:
             len(urls),
             ", ".join(urls),
         )
+        # Every one of them, not just the first: which sites recur IS the diagnosis,
+        # and a message pasting three TikToks is three data points. The log line
+        # above stays exactly as it was -- it serves the person watching the window
+        # right now, the ledger serves the owner reading a month later.
+        #
+        # A message with no URL at all never gets here, deliberately: that is
+        # ordinary chat, not a bounced link, and recording it would bury the signal
+        # under every "jajaja" in the group. Neither does a message that mixed an
+        # unsupported link with a supported one -- something WAS attempted there,
+        # and calling the whole message unattempted would be false.
+        for url in urls:
+            record_rejection(message, url, UNSUPPORTED_ERROR, "")
         return
     for url in supported:
         await _deliver(message, url)
@@ -2333,8 +2366,17 @@ def _check_message_logging() -> None:
             from_user=telegram.User(id=1, first_name="u", is_bot=False),
             text=text,
         )
-        with _capture_log(logging.INFO) as messages:
-            asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
+        # An unsupported host now writes to the ledger as well as to the log, so the
+        # ledger goes somewhere disposable: a self-check run must never leave two
+        # invented TikTok links in the owner's real rejected.jsonl.
+        real_ledger = globals()["REJECTED_LEDGER"]
+        with temp_workspace() as workspace:
+            globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+            try:
+                with _capture_log(logging.INFO) as messages:
+                    asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
+            finally:
+                globals()["REJECTED_LEDGER"] = real_ledger
         return messages
 
     no_url = deliver_nothing("che alguien vio el partido ayer")
@@ -2351,6 +2393,96 @@ def _check_message_logging() -> None:
     # The message body is not the diagnosis, and this is a private group.
     assert "miren" not in rejected[0], f"do not log the message body: {rejected}"
     print("ok  on_message logs why it delivered nothing")
+
+
+def _check_unattempted_links_are_recorded() -> None:
+    """A link on a host the bot does not support is a bounce too, and a different one.
+
+    Four shapes, all driven through the real on_message with _deliver and the ledger
+    path swapped out -- no network, no token. The mixed case is the one that is easy
+    to get wrong: something WAS attempted there, so nothing in that message is
+    unattempted, not even the link that was skipped.
+    """
+
+    def _run(text: str) -> tuple[list[dict], list[str], list[str], str]:
+        message = telegram.Message(
+            message_id=11,
+            date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
+            chat=telegram.Chat(id=-100123, type=telegram.Chat.GROUP),
+            from_user=telegram.User(id=1, first_name="u", is_bot=False),
+            text=text,
+        )
+        delivered: list[str] = []
+
+        async def _fake_deliver(_message: object, url: str) -> None:
+            delivered.append(url)
+
+        real_deliver, real_ledger = globals()["_deliver"], globals()["REJECTED_LEDGER"]
+        globals()["_deliver"] = _fake_deliver
+        with temp_workspace() as workspace:
+            ledger = workspace / "rejected.jsonl"
+            globals()["REJECTED_LEDGER"] = ledger
+            try:
+                with _capture_log(logging.INFO) as lines:
+                    asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
+                raw = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+                return read_rejections(ledger), delivered, lines, raw
+            finally:
+                globals()["_deliver"] = real_deliver
+                globals()["REJECTED_LEDGER"] = real_ledger
+
+    # One unsupported URL.
+    records, delivered, lines, raw = _run("miren https://www.tiktok.com/@a/video/1")
+    assert delivered == [], "nothing on an unsupported host may be attempted"
+    assert len(records) == 1, records
+    assert records[0]["url"] == "https://www.tiktok.com/@a/video/1", records
+    assert records[0]["error"] == UNSUPPORTED_ERROR, records
+    assert records[0]["error"] != "ExtractionError", "a bounce and a skip are different piles"
+    assert records[0]["chat_id"] == -100123 and records[0]["message_id"] == 11, records
+    assert records[0]["detail"] == "", "nothing was attempted, so there is no error text"
+    # The log line the person at the window reads is unchanged by any of this.
+    assert len(lines) == 1 and "none on a supported host" in lines[0], lines
+
+    # Several: every one of them, in order. Recording only the first would hide
+    # exactly the thing this is for -- which site keeps coming back.
+    records, delivered, _lines, raw = _run(
+        "SECRETO-DEL-GRUPO https://www.tiktok.com/@a/video/1 y https://x.com/a/status/2 "
+        "y https://www.reddit.com/r/a/comments/3/"
+    )
+    assert delivered == []
+    assert [record["url"] for record in records] == [
+        "https://www.tiktok.com/@a/video/1",
+        "https://x.com/a/status/2",
+        "https://www.reddit.com/r/a/comments/3/",
+    ], records
+    assert {record["error"] for record in records} == {UNSUPPORTED_ERROR}, records
+    assert "SECRETO-DEL-GRUPO" not in raw, "the message body must never reach the ledger"
+
+    # A mix: the supported link is attempted, so nothing here is unattempted.
+    records, delivered, lines, _raw = _run(
+        "https://www.tiktok.com/@a/video/1 y https://youtu.be/abc"
+    )
+    assert delivered == ["https://youtu.be/abc"], delivered
+    assert records == [], f"a message that was attempted is not a skip: {records}"
+    assert lines == [], "the ignore-logging must not fire when something was delivered"
+
+    # Ordinary chat. Not a bounced link, and recording it would drown the signal.
+    records, delivered, lines, _raw = _run("che alguien vio el partido ayer")
+    assert records == [] and delivered == [], (records, delivered)
+    assert len(lines) == 1 and "no URL recognised" in lines[0], lines
+
+    # And the report keeps the two piles apart, which is why the class exists.
+    report = format_rejections([
+        rejection_record("https://www.tiktok.com/@a/video/1", UNSUPPORTED_ERROR, "", 1, 1,
+                         "2026-08-09T10:00:00-03:00"),
+        rejection_record("https://www.tiktok.com/@b/video/2", UNSUPPORTED_ERROR, "", 1, 2,
+                         "2026-08-09T11:00:00-03:00"),
+        rejection_record("https://youtu.be/c", "ExtractionError", "boom", 1, 3,
+                         "2026-08-09T12:00:00-03:00"),
+    ])
+    assert f"{UNSUPPORTED_ERROR} -- 2" in report and "ExtractionError -- 1" in report, report
+    assert "  tiktok.com -- 2" in report, report
+    print("ok  a link the bot declined to try is recorded, separately from a bounce")
 
 
 def _check_failure_path() -> None:
@@ -2543,6 +2675,7 @@ def _self_check() -> None:
     _check_rejected_ledger()
     _check_failure_replies()
     _check_failed_extraction_keeps_its_error()
+    _check_unattempted_links_are_recorded()
     _check_album_delivery()
     _check_failure_path()
     _check_conflict_handling()
