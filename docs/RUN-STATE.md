@@ -75,3 +75,39 @@ Criteria 1-3 and 5-7 were closed during the GOAL session (`run-history/01-goal-s
 - after a compaction or a gap -> `~/.claude/skills/ceo/references/run-loop.md` (Cold resume) + `continuation.md`
 - before the next verdict -> `audit.md` · before the next order -> `dispatch.md`
 - closed history -> `docs/run-history/01-goal-session.md`
+
+## AUTO round 2 — the baton pass was broken, and the fix is verified end to end
+
+**The defect.** Nobody had ever run two instances at once; the conflict logic was only ever asserted
+as a pure function. Ran the real experiment: **both hosts quit and the group was left with no bot**,
+each telling its user the other one had it. Cause is structural -- `getUpdates` designates no winner,
+so two identical instances see identical evidence and reach the identical wrong conclusion. The
+asymmetry had to be injected from outside, and it already existed in the product: the launcher asks
+*"¿se lo saco y lo prendo yo?"* and threw the answer away.
+
+**The fix, verified by me on the real token, with a valid instrument:** incumbent yields and stops
+with a hedged line; the taker (`--take-over`) stays alive, 19 getUpdates and climbing, zero give-up
+lines; exactly one process left. The old build left zero.
+
+### Instrument error I caught against myself
+I first read `getUpdates` returning `ok:true` as *"nobody is polling"*. **It is not.** My own probe
+terminates the running bot's long-poll and wins the race, so `ok:true` is the *expected* answer
+whenever exactly one bot is polling and I am the second caller. The probe cannot distinguish "nobody"
+from "one bot I just displaced". The earlier "nobody is polling" reading was true only because
+`pgrep` independently showed zero processes. **Standing rule: liveness is `pgrep` plus the bot's own
+polling counter, never my curl.**
+
+### Other things this round measured
+| What | Result |
+|---|---|
+| YouTube Shorts, a playlist URL, a video with `&list=` attached | All three handled. `noplaylist` + `playlist_items` cap a playlist to one item; no flood. |
+| A pasted playlist that "bounced" | **Not a defect and my first reading was wrong** -- it was the oversize path firing correctly on a 120 MB item, a second independent live confirmation of criterion 4. |
+| Three links in one message | 26 s, serial. Predicted 40-70 s; **my prediction was wrong in the optimistic direction.** Not promoted -- see the queue. |
+
+### Claims of mine the agents refuted this round
+- *"the 60 s grace was honoured exactly"* -- **false.** The log shows 74 s and 65 s: `CONFLICT_GRACE`
+  is a floor, and PTB's backoff (capped at 30 s) decides which retry crosses it. A product line said
+  "hasta un minuto" and now says "un minuto o dos".
+- *"slice 0 is the smallest of the three"* -- false; it forced a rewrite of the YouTube signature row.
+- *"one fix closes both the lost diagnosis and the 38 requests"* -- false; only the diagnosis.
+- My rate-limit warning named Facebook; what actually failed was **YouTube, HTTP 403**.
