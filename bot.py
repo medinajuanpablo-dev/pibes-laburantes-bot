@@ -211,6 +211,23 @@ REJECTED_LEDGER = Path(__file__).resolve().parent / "rejected.jsonl"
 # advice. The first line is the diagnosis; the rest is noise in a ledger.
 REJECTED_DETAIL_LIMIT = 400
 
+# Terminal colour, on its way into a file that exists to be read and grepped. A live
+# record from 2026-08-09T17:17 carries yt-dlp's red "ERROR:" as the literal bytes
+# \x1b[0;31mERROR:\x1b[0m, and a second record of the SAME failure nine minutes later
+# carries none -- so the ledger is already inconsistent with itself.
+#
+# CSI only: colour is SGR, and that is the whole observed defect. A stray escape of
+# some other family would survive, which is a cosmetic miss in a diagnostic file.
+#
+# ponytail: WHY one run colours and the next does not is NOT established. The obvious
+# theory -- "yt-dlp colours a TTY and not a pipe" -- was tested both ways, pipe and
+# pseudo-TTY, and produced no escapes at all either time, so it is refuted and the
+# real trigger is unknown. That is exactly why this strips unconditionally instead of
+# asking whether colour is on: a guard on a TTY check, an env var or a yt-dlp flag
+# would be a guard on the wrong thing and would silently do nothing. Stripping text
+# that has no escapes is a no-op, so there is nothing to gain by being cleverer.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;:?]*[ -/]*[@-~]")
+
 # The `error` field of a record is an exception class name wherever there is an
 # exception. The oversize path has none -- nothing failed, the file simply does not
 # fit -- so it gets this token instead, which groups the same way.
@@ -861,6 +878,17 @@ def conflict_action(
 # --------------------------------------------------------------------------------
 
 
+def strip_ansi(text: str) -> str:
+    """`text` with terminal escape sequences removed. Pure, and safe on anything.
+
+    Only the escapes go: "\x1b[0;31mERROR:\x1b[0m" becomes "ERROR:", and every
+    bracket that a human typed -- "[Instagram]" -- stays, because those are the
+    diagnosis. A pattern loose enough to eat the extractor's name would quietly
+    destroy the most useful word in the record.
+    """
+    return ANSI_ESCAPE.sub("", text or "")
+
+
 def rejection_record(
     url: str,
     error: str,
@@ -875,8 +903,12 @@ def rejection_record(
     the diagnosis is the URL, exactly like the ignore-logging in on_message. The
     detail is the error text, truncated -- a yt-dlp error carries the whole login
     advice and a signed URL, and none of that is worth 800 characters a line.
+
+    Colour codes are stripped before the truncation, not after, so the 400 characters
+    are 400 characters of diagnosis rather than of escape sequence.
     """
-    first_line = (detail or "").strip().splitlines()[0] if (detail or "").strip() else ""
+    detail = strip_ansi(detail)
+    first_line = detail.strip().splitlines()[0] if detail.strip() else ""
     if len(first_line) > REJECTED_DETAIL_LIMIT:
         first_line = first_line[:REJECTED_DETAIL_LIMIT] + "..."
     return {
@@ -1517,6 +1549,30 @@ def _check_rejected_ledger() -> None:
     assert len(huge["detail"]) == REJECTED_DETAIL_LIMIT + 3, len(huge["detail"])
     assert rejection_record("u", "E", "", 1, 1, "w")["detail"] == ""
     print("ok  rejection_record")
+
+    # The escapes below are the real bytes of the live 2026-08-09T17:17 record, not a
+    # reproduction -- nobody has been able to make yt-dlp emit them on demand since,
+    # so the record IS the evidence. Only the share token in the URL is elided.
+    coloured = (
+        "yt-dlp could not download https://www.instagram.com/reel/DbpG4CuSKoG/?igsh=...: "
+        "\x1b[0;31mERROR:\x1b[0m [Instagram] DbpG4CuSKoG: This content isn't available "
+        "to everyone: It can't be seen by certain audiences."
+    )
+    cleaned = rejection_record("https://www.instagram.com/reel/DbpG4CuSKoG/", "ExtractionError",
+                               coloured, -100123, 69732, "2026-08-09T17:17:45-03:00")["detail"]
+    assert "\x1b" not in cleaned, f"a control code reached the ledger: {cleaned!r}"
+    assert "[0;31m" not in cleaned and "[0m" not in cleaned, cleaned
+    # What must SURVIVE. A pattern greedy enough to strip "[Instagram]" would throw
+    # away the extractor name, which is the first thing the owner greps for.
+    assert cleaned.startswith("yt-dlp could not download "), cleaned
+    assert "ERROR: [Instagram] DbpG4CuSKoG:" in cleaned, cleaned
+    assert cleaned.endswith("It can't be seen by certain audiences."), cleaned
+    assert len(cleaned) == len(coloured) - len("\x1b[0;31m") - len("\x1b[0m"), cleaned
+    # Ordinary text is untouched, escapes or not.
+    plain = "ERROR: [facebook] 999999999999999: Cannot parse data; please report this issue"
+    assert strip_ansi(plain) == plain, strip_ansi(plain)
+    assert strip_ansi("") == "" and strip_ansi(None) == ""
+    print("ok  the ledger stores text, not terminal colour codes")
 
     class StubMessage:
         chat_id = -100123
