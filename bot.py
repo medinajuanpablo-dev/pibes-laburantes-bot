@@ -1119,22 +1119,56 @@ def conflict_action(
     Returns the action and the new (started, last) pair, so the whole rule is one
     pure function that can be asserted without a network or a second bot:
 
-    * `announce` -- the first conflict of an episode. Say it once.
-    * `quiet`    -- a repeat inside the same episode. python-telegram-bot retries on
-      a growing backoff, so a single competing poller produces a stream of these;
+    * `announce`     -- the first conflict of an episode on an instance nobody told
+      to take the bot over. Say it once.
+    * `take-over`    -- the first conflict of an episode on an instance that was told
+      to. The same event, read the other way round: this one is the one arriving.
+    * `quiet`        -- a repeat inside the same episode. python-telegram-bot retries
+      on a growing backoff, so a single competing poller produces a stream of these;
       logging each one is how the old behaviour became a wall of text.
-    * `give-up`  -- the episode has lasted CONFLICT_GRACE. Somebody really has taken
-      the baton and this instance is no longer receiving anything.
+    * `give-up`      -- the episode has lasted CONFLICT_GRACE on an instance that was
+      not taking over. Somebody has taken the baton and this one is receiving nothing.
+    * `stand-ground` -- the episode has lasted CONFLICT_STANDOFF on an instance that
+      WAS taking over: the other side is not yielding either. Said once, and this
+      instance keeps polling.
+
+    `take_over_until` is the monotonic time until which the intent the person declared
+    at the launcher applies, or None on a normal start. It is the only asymmetry in
+    the whole feature: Telegram hands both pollers the same 409 and designates no
+    winner, so with a symmetric rule both sides conclude they lost and the group is
+    left with no bot -- measured 2026-08-09 (README.md §4.9).
+
+    Two properties of that argument are load-bearing:
+
+    * the role is decided from the *episode's* start, not from `now`, so an intent
+      that expires in the middle of a conflict can never turn a standing-ground
+      instance into a yielding one. That would put both sides back on the give-up
+      path at once, which is the bug this exists to fix;
+    * the intent expires, so the friend who took the bot at 18:00 is an ordinary
+      incumbent by 18:30 and yields to the next person like anybody else. Without an
+      expiry only the first hand-over would ever work.
 
     The episode ends after CONFLICT_EPISODE_GAP of silence. Without that reset, two
     unrelated probes an hour apart would look like one hour-long conflict and the
     second one would kill a perfectly healthy bot.
     """
-    if started is None or last is None or now - last > CONFLICT_EPISODE_GAP:
-        return "announce", now, now
-    if now - started >= CONFLICT_GRACE:
+    new_episode = started is None or last is None or now - last > CONFLICT_EPISODE_GAP
+    episode_started = now if new_episode else started
+    taking_over = take_over_until is not None and episode_started <= take_over_until
+    if new_episode:
+        return ("take-over" if taking_over else "announce"), now, now
+    if taking_over:
+        # Never `give-up` from here. This instance was told to take the bot, and the
+        # other side cannot be observed: if it stops because it also thinks it lost,
+        # a give-up here leaves nobody polling at all. Say once, on the conflict that
+        # crosses CONFLICT_STANDOFF, that the hand-over is not going through -- then
+        # stay quiet and keep polling.
+        if last - episode_started < CONFLICT_STANDOFF <= now - episode_started:
+            return "stand-ground", episode_started, now
+        return "quiet", episode_started, now
+    if now - episode_started >= CONFLICT_GRACE:
         return "give-up", None, None
-    return "quiet", started, now
+    return "quiet", episode_started, now
 
 
 # --------------------------------------------------------------------------------
@@ -1407,7 +1441,7 @@ async def on_error(_update: object, context: object) -> None:
         return
 
     action, _conflict_started, _conflict_last = conflict_action(
-        time.monotonic(), _conflict_started, _conflict_last
+        time.monotonic(), _conflict_started, _conflict_last, _take_over_until
     )
     if action == "quiet":
         return
@@ -1415,9 +1449,46 @@ async def on_error(_update: object, context: object) -> None:
         log.warning("another instance has taken the poll; this one is receiving nothing meanwhile")
         print("Otra persona prendió el bot, así que este dejó de recibir mensajes.")
         return
+    if action == "take-over":
+        # The same 409 the other side is reading as a defeat. This window belongs to
+        # the person who just answered "yes, take it", and telling them somebody else
+        # has the bot would be the opposite of what they asked for.
+        log.warning(
+            "taking the poll over as instructed; the other instance should yield within %.0f s",
+            CONFLICT_GRACE,
+        )
+        print("Se lo estoy sacando a quien lo tenía prendido. Puede tardar hasta un minuto.")
+        return
+    if action == "stand-ground":
+        # Nothing here can arbitrate: the hosts are different laptops and Telegram
+        # refuses to pick a winner. Stopping would risk leaving nobody polling, so
+        # this says the one true thing it knows and hands the decision to the two
+        # people, who -- unlike their bots -- can talk to each other.
+        # ponytail: the ceiling is that two people who both answered yes keep two
+        # instances knocking each other off until one of them closes the window; the
+        # group's bot works erratically meanwhile instead of not at all. The upgrade
+        # path is a real tie-break, and it needs a channel between the hosts that
+        # this project deliberately does not have (README.md §6).
+        log.warning(
+            "still conflicting after %.0f s; the other instance is not yielding either",
+            CONFLICT_STANDOFF,
+        )
+        print(
+            "Parece que otra persona también lo está prendiendo y ninguno de los dos afloja. "
+            "Pónganse de acuerdo: que uno cierre la ventana. Este sigue prendido mientras tanto."
+        )
+        return
 
+    # `give-up`. What this instance actually observed is that it stopped receiving,
+    # and the rest is inference about a process on somebody else's laptop that it
+    # cannot see -- so the wording claims the observation, hedges the cause, and says
+    # what to do if the guess was wrong. On 2026-08-09 it was wrong on both windows at
+    # once and nobody investigated, because both had been told the other one had it.
     log.warning("the conflict lasted %.0f s; stopping so the window says so", CONFLICT_GRACE)
-    print("El bot ahora lo tiene otra persona. Podés cerrar esta ventana.")
+    print(
+        "Este dejó de recibir mensajes, así que se apaga: parece que otra persona prendió el bot. "
+        "Podés cerrar esta ventana. Si el grupo se queda sin bot, volvé a abrir este archivo."
+    )
     application = getattr(context, "application", None)
     if application is not None:
         application.stop_running()
@@ -2843,12 +2914,15 @@ def _check_take_over_intent() -> None:
 
 
 def _check_conflict_handling() -> None:
-    """One line per conflict episode, a clean stop only when it is sustained.
+    """One line per conflict episode, and only one of the two sides ever stops.
 
     The whole path except the network: conflict_action is pure, and on_error takes a
-    stand-in context, so both halves are reachable without a second live bot. What is
-    NOT reachable here is python-telegram-bot actually delivering a Conflict to the
-    handler -- that needs two instances and a real token.
+    stand-in context, so both halves are reachable without a second live bot. Both
+    roles are driven over the same simulated timeline, because the failure this file
+    is guarding against is not one instance behaving badly -- it is two instances
+    behaving identically. What is NOT reachable here is python-telegram-bot actually
+    delivering a Conflict to the handler, nor two real instances on one token: that
+    needs the owner and a second machine.
     """
     # A single probe: the launcher asks Telegram whether anybody is polling, which
     # costs the running instance a burst of conflicts for about ten seconds. It gets
@@ -2877,6 +2951,57 @@ def _check_conflict_handling() -> None:
     assert "give-up" in actions, actions
     assert actions.index("give-up") * 25.0 >= CONFLICT_GRACE, actions
 
+    # --- The same conflicts, read by the side that was told to take the bot --------
+    # Monotonic 0.0 is this process's start, so the answer the person gave at the
+    # launcher covers everything up to TAKE_OVER_WINDOW.
+    # Every conflict below is dated from 1 s in, not from 0.0: polling starts after
+    # the process does, so a timeline that began exactly at the deadline would let a
+    # zero-length window -- an intent that is never live for anything -- pass.
+    taking_over_until = TAKE_OVER_WINDOW
+
+    # The launcher's own probe against an instance that took the bot a minute ago:
+    # one line, no stop, exactly as tolerant as any other instance.
+    started = last = None
+    actions = []
+    for moment in (1.0, 2.0, 3.5, 5.7, 9.1, 11.0):
+        action, started, last = conflict_action(moment, started, last, taking_over_until)
+        actions.append(action)
+    assert actions == ["take-over"] + ["quiet"] * 5, actions
+
+    # A real hand-over, driven far past the point where the incumbent above gave up
+    # and past the intent's own expiry: this side never gives up. If it did, both
+    # sides could stop on the same conflict and the group would be left with no bot,
+    # which is exactly what the 2026-08-09 experiment produced.
+    started = last = None
+    moment = 1.0
+    actions = []
+    while moment <= CONFLICT_STANDOFF + 60.0:
+        action, started, last = conflict_action(moment, started, last, taking_over_until)
+        actions.append(action)
+        moment += 25.0
+    assert (len(actions) - 1) * 25.0 > TAKE_OVER_WINDOW, "the timeline must outlast the intent"
+    assert "give-up" not in actions, actions
+    assert actions.count("take-over") == 1, actions
+    # And it says exactly once that the other side is not yielding either.
+    assert actions.count("stand-ground") == 1, actions
+    standoff = actions.index("stand-ground")
+    assert standoff * 25.0 >= CONFLICT_STANDOFF, actions
+    assert (standoff - 1) * 25.0 < CONFLICT_STANDOFF, actions
+    assert set(actions[standoff + 1 :]) == {"quiet"}, actions
+
+    # Two hours later somebody else asks for the baton. The intent has expired, so
+    # this instance is an ordinary incumbent and yields like anybody else -- without
+    # that expiry only the first hand-over of the day would ever work.
+    started = last = None
+    moment = 7200.0
+    actions = []
+    while "give-up" not in actions and moment <= 7200.0 + CONFLICT_GRACE + 30.0:
+        action, started, last = conflict_action(moment, started, last, taking_over_until)
+        actions.append(action)
+        moment += 25.0
+    assert actions[0] == "announce", actions
+    assert actions[-1] == "give-up", actions
+
     # The handler has to be registered, not merely written. The token below is a
     # syntactically shaped fake and never leaves this process: building an
     # Application makes no request.
@@ -2895,10 +3020,11 @@ def _check_conflict_handling() -> None:
             self.error = error
             self.application = application
 
-    global _conflict_started, _conflict_last
-    saved = (_conflict_started, _conflict_last)
+    global _conflict_started, _conflict_last, _take_over_until
+    saved = (_conflict_started, _conflict_last, _take_over_until)
     application = StopRecordingApplication()
     try:
+        _take_over_until = None
         _conflict_started = _conflict_last = None
         with _capture_log(logging.WARNING) as warnings:
             spoken = io.StringIO()
@@ -2923,8 +3049,53 @@ def _check_conflict_handling() -> None:
         assert application.stopped == 1, "a sustained conflict must stop the bot"
         assert len(warnings) == 1, warnings
         assert "cerrar esta ventana" in spoken.getvalue(), spoken.getvalue()
+        # It may not claim to know what a process on another laptop is doing, and it
+        # has to leave the friend able to recover if the guess was wrong.
+        assert "parece que" in spoken.getvalue(), spoken.getvalue()
+        assert "volvé a abrir este archivo" in spoken.getvalue(), spoken.getvalue()
+
+        # The same event on the side that was told to take the bot over: its own
+        # line, and no stop.
+        _take_over_until = time.monotonic() + TAKE_OVER_WINDOW
+        _conflict_started = _conflict_last = None
+        with _capture_log(logging.WARNING) as warnings:
+            spoken = io.StringIO()
+            with redirect_stdout(spoken):
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+        assert len(warnings) == 1, f"one line per episode, got {warnings}"
+        assert "taking the poll over" in warnings[0], warnings
+        assert spoken.getvalue().count("\n") == 1, spoken.getvalue()
+        assert "Se lo estoy sacando" in spoken.getvalue(), spoken.getvalue()
+        assert application.stopped == 1, "a take-over must not stop on its first conflict"
+
+        # And it still does not stop once that conflict has outlasted the grace the
+        # yielding side stops at. Both sides stopping is the whole bug.
+        _conflict_last = time.monotonic()
+        _conflict_started = _conflict_last - CONFLICT_GRACE - 1.0
+        with _capture_log(logging.WARNING) as warnings:
+            spoken = io.StringIO()
+            with redirect_stdout(spoken):
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+        assert application.stopped == 1, "the take-over side must never give up the poll"
+        assert warnings == [], warnings
+        assert spoken.getvalue() == "", spoken.getvalue()
+
+        # Past CONFLICT_STANDOFF it says so -- once -- and keeps polling.
+        _conflict_started = time.monotonic() - CONFLICT_STANDOFF - 1.0
+        _conflict_last = _conflict_started + CONFLICT_STANDOFF - 5.0
+        with _capture_log(logging.WARNING) as warnings:
+            spoken = io.StringIO()
+            with redirect_stdout(spoken):
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+                asyncio.run(on_error(None, Context(telegram.error.Conflict("c"), application)))
+        assert len(warnings) == 1, f"one line per episode, got {warnings}"
+        assert "not yielding" in warnings[0], warnings
+        assert "que uno cierre la ventana" in spoken.getvalue(), spoken.getvalue()
+        assert application.stopped == 1, "standing its ground must keep this one polling"
 
         # Anything that is not a Conflict keeps its traceback and stops nothing.
+        _take_over_until = None
         _conflict_started = _conflict_last = None
         with _capture_log(logging.ERROR) as errors:
             asyncio.run(on_error(None, Context(telegram.error.TimedOut(), application)))
@@ -2932,8 +3103,8 @@ def _check_conflict_handling() -> None:
         assert "unhandled error" in errors[0], errors
         assert application.stopped == 1, "only a conflict stops the bot"
     finally:
-        _conflict_started, _conflict_last = saved
-    print("ok  a conflict is one line, and only a sustained one stops the bot")
+        _conflict_started, _conflict_last, _take_over_until = saved
+    print("ok  one line per episode, and only the side that was not taking over stops")
 
 
 def _check_startup_drops_the_backlog() -> None:
