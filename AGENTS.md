@@ -19,6 +19,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
 | the Spanish line each named failure gets, and why three of them hedge | `README.md` §5.2 ← read before touching `FAILURE_SIGNATURES` |
 | carousels, albums, `sendMediaGroup`'s limits | `README.md` §4.10 |
+| message entities, the UTF-16 offset trap, why `text_link` is refused | `README.md` §4.11 |
 | why something was *not* built | `README.md` §6 |
 | how the project got here, and which premises turned out false | `docs/history.md` |
 | the original plan and prompt-order (superseded) | `docs/archive/` |
@@ -135,7 +136,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   either `record_rejection` call site in `_deliver` · a ledger write failure escaping · the ledger
   recording the message body · `on_message` not recording an unsupported host at all, recording only
   the first of its URLs, or sharing a real failure's error class · a message with no URL, or a mixed
-  message whose supported link WAS attempted, recorded as unattempted · a record written without its line ending · `read_rejections` dying on
+  message whose supported link WAS attempted, recorded as unattempted · `entity_urls` slicing the
+  text by Python index instead of asking `parse_entity` (an emoji before the link then eats its
+  first character, silently) · the entity source replacing the regex instead of unioning with it ·
+  a schemeless entity delivered without a scheme (`urlparse` gives it no hostname) · the union
+  losing its de-duplication, or accepting `text_link` · a record written without its line ending · `read_rejections` dying on
   a half-written line · the report dropping its error-class or host grouping, or hiding the URLs ·
   any of `carousel_slides`' four guards · an album sent as `Path`s instead of open files · the
   album send dropping `connect_timeout` · `upload_ceiling` holding an album to 50 MiB · `_deliver`
@@ -167,10 +172,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 
 ## Open, known, and deliberately unfixed
 
-- **`URL_PATTERN` requires an explicit `http(s)://` scheme**, so a bare `youtu.be/xyz` — which
-  Telegram itself renders as a link — is ignored. The log now says `no URL recognised` for exactly
-  this case, which discriminates it from an unsupported host. Upgrade path: read `message.entities`.
-  Not done because no confirmed case has needed it yet.
+- **The second URL source is verified by construction only.** `entity_urls()` reads Telegram's own
+  `url` entities so a schemeless `youtu.be/xyz` is no longer invisible (`README.md` §4.11), but
+  **nobody has posted one into the real group and watched what Telegram sends.** Every entity the
+  self-check drives is one the check built, with offsets written the way the Bot API documents them
+  — UTF-16 code units. Treat "Telegram sends a `url` entity for a bare domain, at these offsets" as
+  an assumption until a real paste confirms it. `text_link` is refused deliberately, and while it
+  is refused its demand is **invisible**: a message carrying only one logs `no URL recognised` and
+  writes no ledger record, so nobody will see it building up.
 - **The oversize → direct-link path has never run against Telegram.** Nothing in the live session
   exceeded 50 MB. It is covered by asserts and a source read only. Treat it as unproven.
 - **Mixed photo/video Instagram carousels are still refused, and still unmeasured.** All-image ones

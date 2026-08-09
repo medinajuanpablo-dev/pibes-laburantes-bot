@@ -23,7 +23,10 @@ Long-polling client, not a server. No inbound port, no webhook, no TLS to manage
 ```
 Telegram update
   └─ on_message                    filters: real messages only, text or caption
-       ├─ find_urls(text)          regex, http(s):// required
+       ├─ message_urls(message)    the union of two sources, de-duplicated
+       │    ├─ find_urls(text)          regex, http(s):// required
+       │    └─ entity_urls(message)     Telegram's own `url` entities, so a
+       │                                schemeless youtu.be/xyz is seen too
        ├─ is_supported(url)        host allow-list; everything else is logged AND
        │                           written to the ledger as UnsupportedHost
        └─ _deliver(url)
@@ -52,6 +55,8 @@ token.** That is what makes the self-check possible.
 | Function | Contract |
 |---|---|
 | `find_urls(text)` | every `http(s)://` URL in order, de-duplicated, trailing punctuation stripped |
+| `entity_urls(message)` | every `url` entity Telegram marked, with `https://` added when it has no scheme — §4.11 |
+| `message_urls(message)` | the union of the two, regex first, de-duplicated |
 | `is_supported(url)` | host is in `SUPPORTED_HOSTS` or a subdomain of one |
 | `media_kind(path, has_audio)` | `photo` by suffix · `animation` for `.gif` **or a silent clip** · else `video` |
 | `reply_method_name(kind)` | the `telegram.Message` method that renders that kind inline |
@@ -379,6 +384,38 @@ Four things here are not derivable from the code:
 sharer was looking at, so reading it as "send this one" is a guess about intent. The album is the
 safe superset. The self-check's carousel URL still carries `img_index=9`, so this stays proven.
 
+### 4.11 Message entities — the links only Telegram sees
+
+`URL_PATTERN` requires `http(s)://`, so a bare `youtu.be/xyz` — which the Telegram client renders as
+a tappable link — used to be invisible to the bot. `entity_urls()` reads the entities Telegram
+attaches to the message and unions them with the regex's result, regex first, de-duplicated. Adding
+a source can only ever add links; anything that worked before produces the same list in the same
+order.
+
+**Only `url` entities are taken.** Telegram has two types that carry a link:
+
+| Type | What it is | Taken |
+|---|---|---|
+| `url` | text Telegram itself recognised as a link — what the entity says is what the group sees | **yes** |
+| `text_link` | a URL hidden behind display text, from Telegram's "create link" formatting | **no** |
+
+`text_link` is refused because acting on it means downloading something nobody in the chat can
+read, and because no case has needed it. Refusing is the self-correcting mistake — nothing happens
+and the friend pastes the plain link. Asking for one type also means a new entity type in a future
+Bot API cannot quietly start feeding yt-dlp, which listing what to skip would not give you.
+
+**The offsets are in UTF-16 code units, not Python characters, and this is the trap.** An emoji
+outside the BMP is two code units and one Python character, so `text[offset:offset + length]` on
+`😂 youtu.be/abc` returns `outu.be/abc` — a string `is_supported()` rejects without a word. The bot
+calls python-telegram-bot's `parse_entity()`, which does the UTF-16 round trip, rather than slicing
+itself. A schemeless entity gets `https://` prepended, because `urlparse("youtu.be/abc")` has no
+hostname at all and the link would be dropped one line later.
+
+**None of this has been confirmed end to end.** Every entity the self-check drives is one the check
+constructed; nobody has posted a schemeless link into the real group and watched what Telegram
+sends. The offsets are built the way the Bot API documents them, and that is an assumption until a
+real paste confirms it.
+
 ---
 
 ## 5. Operations — what actually breaks
@@ -389,10 +426,10 @@ their pages without warning, and that is this project's real failure mode.
 1. **Videos stop downloading → update yt-dlp first.** `.venv/bin/pip install -U yt-dlp`. This fixes
    the large majority of breakages and nothing else is worth trying before it.
 2. **The bot ignores a link → read the log.** `on_message` says which of the two happened:
-   - `message N: no URL recognised, nothing to do` — the text had no `http(s)://` URL. **Known
-     limitation:** Telegram renders bare `youtu.be/xyz` as a clickable link, but the raw text has no
-     scheme and `URL_PATTERN` requires one. The upgrade path is reading `message.entities` and
-     letting Telegram decide what a link is.
+   - `message N: no URL recognised, nothing to do` — neither the regex nor Telegram's own entities
+     found a link (§4.11). A bare `youtu.be/xyz` is **not** this case any more; if it lands here,
+     either Telegram sent no `url` entity or the link was a formatted `text_link`, which is refused
+     on purpose.
    - `message N: 2 URL(s) found, none on a supported host -- rejected: …` — the URLs are printed
      because they are the entire diagnosis. Add the host to `SUPPORTED_HOSTS` if it belongs there.
      These also go in the ledger under `UnsupportedHost` (§5.1), so the question survives the

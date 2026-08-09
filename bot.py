@@ -155,11 +155,14 @@ SUPPORTED_HOSTS = frozenset(
     }
 )
 
-# Only scheme-carrying URLs count. A bare "instagram.com" mentioned mid-sentence is
-# someone talking about a site, not a link to fetch.
-# ponytail: this misses schemeless pastes like "youtu.be/xyz" that Telegram itself
-# renders as links. Upgrade path if that turns out to annoy the group: read
-# message.entities instead of the raw text and let Telegram decide what a link is.
+# Only scheme-carrying URLs count HERE. A bare "instagram.com" mentioned mid-sentence
+# is someone talking about a site, not a link to fetch -- and this pattern has no way
+# to tell those apart, which is why it keeps insisting on a scheme.
+#
+# Telegram can tell them apart, because its client already decided which words to
+# underline, so entity_urls() reads that decision and message_urls() unions the two.
+# This pattern is the first half of that union and its contract has not changed: do
+# not loosen it to catch bare domains, that job now belongs to the entities.
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'()\[\]]+", re.IGNORECASE)
 
 # Trailing punctuation a human types after a pasted link: "mira esto https://x.com/y."
@@ -833,6 +836,90 @@ def find_urls(text: str | None) -> list[str]:
     return found
 
 
+def entity_urls(message: telegram.Message) -> list[str]:
+    """Every link Telegram itself marked in the message, in order, carrying a scheme.
+
+    The second source of URLs, and the reason `youtu.be/xyz` is no longer invisible:
+    Telegram linkifies a bare domain in its own client, and `URL_PATTERN` requires a
+    scheme, so until now the bot never saw a link the group could plainly see and tap.
+
+    ONLY `url` entities are taken. Telegram has two entity types that carry a link
+    and they are not the same thing:
+
+      * `url` -- text Telegram itself recognised as a link. What the entity says IS
+        what the group sees on screen, which is the whole reason it is safe to act on.
+      * `text_link` -- a URL hidden behind display text, the thing Telegram's "create
+        link" formatting produces. Refused. This bot's contract is "paste a link, get
+        the media", and honouring a text_link means downloading something nobody in
+        the chat can read -- the same instinct that keeps raw error text out of the
+        group. Refusing is also the self-correcting mistake: nothing happens and the
+        friend pastes the plain link. Nothing else is a link at all -- `mention`,
+        `email`, `phone_number` and the formatting types are excluded by asking for
+        one type rather than by listing what to skip, so a new entity type in a
+        future Bot API cannot quietly start feeding yt-dlp.
+        ponytail: no measured case has needed text_link, and this repo does not add
+        behaviour on a guess. It is also invisible while refused -- a message that
+        carries nothing else logs "no URL recognised" and writes no ledger record,
+        so nobody will see demand for it building up. Upgrade path if a friend ever
+        reports "le mandé un link y no hizo nada" and the message turns out to be
+        formatted: read `entity.url` for this type instead of the text slice, and
+        decide then whether the group should be told which URL was taken.
+
+    A caption is the same story with different attribute names -- MESSAGE_FILTER
+    accepts captions, so a video posted with a link in its caption has to work too.
+
+    The offsets are the trap. Telegram counts them in UTF-16 code units, not Python
+    characters, so one emoji before the link shifts every naive slice by one and the
+    URL comes back with its first character eaten -- "outu.be/abc", which is_supported
+    then rejects, silently. python-telegram-bot's own parse_entity does the UTF-16
+    round trip, so this asks the library rather than re-deriving it here.
+    """
+    text = getattr(message, "text", None)
+    if text:
+        entities = getattr(message, "entities", None) or ()
+        parse = getattr(message, "parse_entity", None)
+    else:
+        text = getattr(message, "caption", None)
+        entities = getattr(message, "caption_entities", None) or ()
+        parse = getattr(message, "parse_caption_entity", None)
+    if not text or not entities or parse is None:
+        return []
+
+    found: list[str] = []
+    for entity in entities:
+        if getattr(entity, "type", None) != telegram.MessageEntity.URL:
+            continue
+        url = parse(entity).strip().rstrip(URL_TRAILING_JUNK)
+        if not url:
+            continue
+        # Telegram linkifies a bare domain, and tapping it opens https. Without a
+        # scheme urlparse reads the whole thing as a path and hands is_supported no
+        # hostname at all, so the link would be dropped one line later.
+        if "://" not in url:
+            url = "https://" + url
+        if url not in found:
+            found.append(url)
+    return found
+
+
+def message_urls(message: telegram.Message) -> list[str]:
+    """Every URL in a message, from both sources, de-duplicated. Regex first.
+
+    A union, never a replacement. The regex is what works today and it stays first,
+    so any message that already produced a list produces exactly the same list in
+    exactly the same order; the entities can only ever ADD the links Telegram saw
+    and the pattern could not. The same link arriving from both sources is one link:
+    both sides strip the same trailing punctuation and both carry a scheme by the
+    time they are compared, so `youtu.be/abc` and `https://youtu.be/abc` in one
+    message are recognised as the same URL rather than downloaded twice.
+    """
+    urls = find_urls(getattr(message, "text", None) or getattr(message, "caption", None))
+    for url in entity_urls(message):
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
 def is_supported(url: str) -> bool:
     """Whether the URL points at one of the three sites the group actually pastes."""
     host = (urlparse(url).hostname or "").lower().removeprefix("www.")
@@ -1193,6 +1280,9 @@ async def on_message(update: telegram.Update, _context: object) -> None:
     all or the URLs were recognised and rejected as unsupported hosts. Those two have
     different fixes and there is no way to tell them apart from the chat.
 
+    "No URL recognised" now means neither the regex NOR Telegram found one, which is
+    a much smaller set than it used to be -- see message_urls.
+
     The rejected URLs go in the log because they are the entire diagnosis. The
     message body does not: this is a private group.
 
@@ -1205,7 +1295,7 @@ async def on_message(update: telegram.Update, _context: object) -> None:
     message = update.effective_message
     if message is None:
         return
-    urls = find_urls(message.text or message.caption)
+    urls = message_urls(message)
     if not urls:
         log.info("message %s: no URL recognised, nothing to do", message.message_id)
         return
@@ -1510,6 +1600,88 @@ def _check_pure_helpers() -> None:
     assert find_urls("https://youtu.be/abc https://youtu.be/abc") == ["https://youtu.be/abc"]
     assert find_urls("HTTPS://YOUTU.BE/abc") == ["HTTPS://YOUTU.BE/abc"]
     print("ok  find_urls")
+
+    # entity_urls and message_urls: the links only Telegram can see.
+    #
+    # NOTHING HERE IS END-TO-END. Nobody has posted a schemeless link into the real
+    # group and watched what Telegram actually sends, so every entity below is one
+    # this code constructed. The offsets are computed the way the Bot API documents
+    # them -- UTF-16 code units -- and that is an assumption until a real paste
+    # confirms it. See "Open, known" in AGENTS.md.
+    def _entity(kind: str, offset: int, length: int, url: str | None = None) -> telegram.MessageEntity:
+        return telegram.MessageEntity(type=kind, offset=offset, length=length, url=url)
+
+    def _message(text: str, *entities: telegram.MessageEntity, caption: bool = False) -> telegram.Message:
+        body = {"caption": text, "caption_entities": entities} if caption else \
+               {"text": text, "entities": entities}
+        return telegram.Message(
+            message_id=1,
+            date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
+            chat=telegram.Chat(id=-100, type=telegram.Chat.GROUP),
+            from_user=telegram.User(id=1, first_name="u", is_bot=False),
+            **body,
+        )
+
+    # A message with no entities at all is exactly what it was before.
+    assert message_urls(_message("mira https://youtu.be/abc")) == ["https://youtu.be/abc"]
+    assert message_urls(_message("che alguien vio el partido")) == []
+    assert entity_urls(_message("mira https://youtu.be/abc")) == [], "no entities, no second source"
+
+    # Scheme-carrying, from both sources: ONE link, not two.
+    both = _message("mira https://youtu.be/abc", _entity("url", 5, 20))
+    assert entity_urls(both) == ["https://youtu.be/abc"], entity_urls(both)
+    assert message_urls(both) == ["https://youtu.be/abc"], "the same link from both sources is one"
+
+    # Schemeless: the whole point. The regex sees nothing; Telegram saw a link.
+    bare = _message("mira youtu.be/abc", _entity("url", 5, 12))
+    assert find_urls("mira youtu.be/abc") == [], "the regex still requires a scheme"
+    assert message_urls(bare) == ["https://youtu.be/abc"], message_urls(bare)
+    assert is_supported(message_urls(bare)[0]), "a schemeless link must survive is_supported"
+
+    # Both kinds in one message, and the union keeps the regex's order first so that
+    # nothing which worked before changes shape.
+    mixed = _message(
+        "https://youtu.be/abc y tiktok.com/@a/video/1",
+        _entity("url", 0, 20), _entity("url", 23, 21),
+    )
+    assert message_urls(mixed) == ["https://youtu.be/abc", "https://tiktok.com/@a/video/1"], \
+        message_urls(mixed)
+
+    # The same link written both ways in one message is still one link.
+    twice = _message("youtu.be/abc y https://youtu.be/abc",
+                     _entity("url", 0, 12), _entity("url", 15, 20))
+    assert message_urls(twice) == ["https://youtu.be/abc"], message_urls(twice)
+
+    # THE TRAP. Telegram counts offsets in UTF-16 code units and an emoji outside the
+    # BMP is TWO of them while being one Python character, so text[offset:] eats the
+    # first letter of the link -- "outu.be/abc", which is_supported then rejects
+    # without a word. This assert is the difference between the feature working and
+    # failing silently for every message that starts with an emoji, which in this
+    # group is most of them.
+    emoji = _message("\U0001f602 youtu.be/abc", _entity("url", 3, 12))
+    assert emoji.text[3:15] == "outu.be/abc", "the naive slice really is wrong here"
+    assert message_urls(emoji) == ["https://youtu.be/abc"], message_urls(emoji)
+    # Two of them, and one inside the sentence, so an off-by-one in either direction
+    # is caught rather than cancelling out.
+    emojis = _message("\U0001f602\U0001f602 mira \U0001f525 youtu.be/abc ahora",
+                      _entity("url", 13, 12))
+    assert message_urls(emojis) == ["https://youtu.be/abc"], message_urls(emojis)
+
+    # A caption is the other half of MESSAGE_FILTER and uses different attributes.
+    captioned = _message("mira youtu.be/abc", _entity("url", 5, 12), caption=True)
+    assert message_urls(captioned) == ["https://youtu.be/abc"], message_urls(captioned)
+
+    # A hidden URL behind display text is refused, deliberately: the group cannot
+    # read it. Refusing it must not also lose the plain link next to it.
+    hidden = _message("mira esto y https://youtu.be/abc",
+                      _entity("text_link", 0, 9, "https://www.instagram.com/p/x/"),
+                      _entity("url", 12, 20))
+    assert message_urls(hidden) == ["https://youtu.be/abc"], message_urls(hidden)
+    # And nothing that is not a link may reach yt-dlp because it happens to be marked.
+    for kind in ("mention", "hashtag", "bold", "code", "email", "phone_number"):
+        noise = _message("nasa@example.com", _entity(kind, 0, 16))
+        assert message_urls(noise) == [], f"{kind} is not a link: {message_urls(noise)}"
+    print("ok  entity_urls unions Telegram's own links in, offsets and all")
 
     # is_supported: the three sites, their subdomains and short forms, and nothing else.
     for url in (
@@ -2404,13 +2576,14 @@ def _check_unattempted_links_are_recorded() -> None:
     unattempted, not even the link that was skipped.
     """
 
-    def _run(text: str) -> tuple[list[dict], list[str], list[str], str]:
+    def _run(text: str, *entities: telegram.MessageEntity) -> tuple[list[dict], list[str], list[str], str]:
         message = telegram.Message(
             message_id=11,
             date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
             chat=telegram.Chat(id=-100123, type=telegram.Chat.GROUP),
             from_user=telegram.User(id=1, first_name="u", is_bot=False),
             text=text,
+            entities=entities,
         )
         delivered: list[str] = []
 
@@ -2470,6 +2643,22 @@ def _check_unattempted_links_are_recorded() -> None:
     records, delivered, lines, _raw = _run("che alguien vio el partido ayer")
     assert records == [] and delivered == [], (records, delivered)
     assert len(lines) == 1 and "no URL recognised" in lines[0], lines
+
+    # A schemeless link Telegram saw and the regex could not: delivered when the host
+    # is supported, recorded when it is not. Both halves of the second source, through
+    # the real on_message rather than through message_urls on its own.
+    records, delivered, _lines, _raw = _run(
+        "\U0001f602 tiktok.com/@a/video/1",
+        telegram.MessageEntity(type="url", offset=3, length=21),
+    )
+    assert delivered == [], delivered
+    assert [record["url"] for record in records] == ["https://tiktok.com/@a/video/1"], records
+    assert records[0]["error"] == UNSUPPORTED_ERROR, records
+    records, delivered, _lines, _raw = _run(
+        "\U0001f602 youtu.be/abc", telegram.MessageEntity(type="url", offset=3, length=12)
+    )
+    assert delivered == ["https://youtu.be/abc"], delivered
+    assert records == [], records
 
     # And the report keeps the two piles apart, which is why the class exists.
     report = format_rejections([
