@@ -1,6 +1,31 @@
 # CEO loop-state — Telegram meme bot
 
 ## Run
+- **Mode:** **AUTO** (open-ended, no time box, no `ask`) since **2026-08-09 17:15 -03**. Previously
+  GOAL from 2026-08-07 14:33. Objective at *directivo*: I source it.
+- **Docs loaded (AUTO re-stamp, round 0 / 2026-08-09 17:15):** modes ✓ · continuation ✓ · run-loop ✓ ·
+  audit ✓ · dispatch ✓ · loop-state-template ✓ — all read in this same session, none through a compaction.
+- **I am the live host.** The user went AFK at 17:15 and handed hosting to me: the bot runs from the
+  **main tree** on the merged tip. Consequences that bind every agent from here on: **no second
+  instance, no `getUpdates` from anywhere** (it steals the live poll), and the main tree is a live
+  surface, not just a working copy.
+
+### AUTO round 1 — closed the last unproven acceptance criterion
+**Criterion 4 (oversize → direct link) is now PROVEN LIVE.** I drove the project's own `_deliver`
+against a real 73 MB YouTube video (`eRsGyueVLvQ`, 888 s) with a `Message` from the real group:
+`_deliver` returned without raising and the ledger recorded
+`OversizeForTelegram · 73564500 bytes as video, over the 52428800-byte ceiling`. Prediction was
+written before the run and matched on all four points. **Every acceptance criterion of the original
+GOAL is now verified live.**
+
+**And I corrected an error of my own from the previous round.** I had called the album path "proven,
+just wire it" on the strength of a `curl sendMediaGroup`. The implementing agent showed that curl
+bypasses python-telegram-bot, where the actual defect lived (`InputMediaPhoto(Path(...))` serialises
+to `file:///…` and uploads nothing). I then drove the project's real `_send_album` against the live
+group with 10 slides — it returned clean against the cloud API, which rejects `file:///` with no
+attachments, so the path is now genuinely exercised. **My curl proved Telegram accepts an album; it
+never proved the bot sends one. Different claims.**
+
 - **Mode:** GOAL · **started:** 2026-08-07 14:33 -03
 - **Deadline:** — (no time box) · **aterrizaje:** no iniciado
 - **Objective:** execute `PLAN.md` (Telegram meme bot, phase 1). Definition locked at kickoff — see below.
@@ -182,7 +207,7 @@ pattern is visible.
 | 1 | Starts on a real token, answers `/start` | ✅ live — `sendMessage 200 OK` |
 | 2 | YouTube link → playable video in the group | ✅ live — `youtu.be/rlXRiIGzmoo?si=…`, 17.64 MB, 53 s, user confirmed visually |
 | 3 | Instagram / Facebook → actual media inline | ✅ live — 4 distinct reels across both sites, including a `share/r/` shape in none of our tests |
-| 4 | Oversize → direct link instead of failure | ⚠️ **UNPROVEN LIVE** — proxied by unit assert + source read |
+| 4 | Oversize → direct link instead of failure | ✅ **PROVEN LIVE 2026-08-09** — drove `_deliver` against a real 73 MB YouTube video from the real group; ledger recorded `OversizeForTelegram · 73564500 bytes ... over the 52428800-byte ceiling` |
 | 5 | Gates pass on the merged tip, run by me | ✅ 12 assertions, exit 0 |
 | 6 | No secret in git; README documents BotFather + yt-dlp rot | ✅ token grep across all history = 0 |
 | 7 | Checkpoint report PLAN.md asked for | ✅ delivered, and it killed several of the plan's own premises |
@@ -230,3 +255,19 @@ for it. The agent flagged the conflict instead of taking it silently.
 - **Instagram carousels** — refused by design, never measured. No public example found.
 - **End-to-end image delivery through the bot** — the Telegram half is proven (`sendPhoto`), the
   full paste-to-photo path awaits the owner's retest on the restarted process.
+
+## AUTO round 1 — hunt log
+| What I ran | Predicted | Observed | Where it went |
+|---|---|---|---|
+| Drove `_send_album` (the project's own function, not curl) with 10 carousel slides against the live group | The agent says PTB serialises a `Path` to a `file://` URL and uploads nothing -- so either it raises, or my earlier "proven" claim was hollow | Returned clean against the **cloud** API, which rejects a `file://` media with no attachments, so real uploads happened and the path is exercised | Closed the gap the agent found in my own claim |
+| Drove `_deliver` with `youtube.com/watch?v=eRsGyueVLvQ` (888 s, ~73 MB at this format) | Downloads it all, `delivery_decision` returns `"link"`, Spanish oversize reply, one ledger record | All four confirmed | **Acceptance criterion 4 closed** |
+| Read the ledger after ~5 min of real hosting | Empty -- I only just took over | **A real field bounce I did not cause**: an Instagram reel posted by the group at 17:17 failed with *"This content isn't available to everyone"* | Order 04 |
+| Probed 6 failure classes across the three sites with `--simulate` (restricted / nonexistent / profile-URL / deleted / private / dead) | Each class has a distinct signature worth mapping to a specific reply | 5 distinct signatures, and **two collisions**: YouTube deleted and private are *both* `Video unavailable`; Facebook dead is `Cannot parse data`, which an earlier agent also saw under **rate limiting** | Order 04, with an explicit instruction not to claim certainty the signature does not carry |
+| Read the raw ledger JSON | Clean text | **ANSI colour escape sequences** from yt-dlp leaking into the ledger detail | Order 04 slice 1 |
+
+## AUTO round 1 — decisions
+| # | Decision | Why | Reversible? |
+|---|---|---|---|
+| 5 | Next frontier is **naming the cause of a bounce**, not more hardening | Portfolio check: the last four landings were all capability (image posts, carousels, launchers, ledger), so the run is not drifting into hardening. This one is capability too -- it changes what the product *tells* a friend, which is the whole UX at 20 links a week. | Yes |
+| 6 | Map **only measured signatures**, and hedge the two ambiguous ones | `Video unavailable` fires on deleted *and* private; `Cannot parse data` fires on dead *and* throttled. A confident wrong message is worse than the generic one. | Yes |
+| 7 | Did **not** add a seventh self-check download for the new failure paths | The signatures are strings. A check that needs a broken remote post breaks when someone deletes it. | Yes |
