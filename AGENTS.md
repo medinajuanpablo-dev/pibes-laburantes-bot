@@ -17,6 +17,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
 | what breaks in production and how to diagnose it | `README.md` §5 |
 | the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
+| the Spanish line each named failure gets, and why three of them hedge | `README.md` §5.2 ← read before touching `FAILURE_SIGNATURES` |
 | carousels, albums, `sendMediaGroup`'s limits | `README.md` §4.10 |
 | why something was *not* built | `README.md` §6 |
 | how the project got here, and which premises turned out false | `docs/history.md` |
@@ -90,6 +91,18 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   probe sees `entries: 1`; without it, all of them. Anything measured with a raw
   `yt-dlp --dump-single-json` is therefore a different dict from the one the code gets — carousel
   work goes through `_carousel_options`. `README.md` §4.10.
+- **A failing YouTube link never reaches the ledger as YouTube's error.** yt-dlp says *This video
+  is unavailable*; `ignore_no_formats_error` does not suppress that on Instagram but **does** let
+  an unavailable YouTube video through the probe with no formats and 38 thumbnails, so
+  `is_image_post()` says yes, the thumbnail fetch finds nothing, and its own error replaces
+  yt-dlp's. The apology is still correct; the diagnosis is lost. `is_image_post`'s docstring said
+  "a failed extraction never reaches this function at all" and that is Instagram-only — measured
+  2026-08-09. Anything keyed on a YouTube error string must be keyed on what survives.
+- **A reply may never claim more than its signature carries, and three of the five cannot.**
+  Facebook's `Cannot parse data` also fires on a good URL under rate limiting, and YouTube's
+  deleted and private are byte-identical, so those replies offer both readings. `README.md` §5.2.
+  An unrecognised failure must stay `FAILURE_REPLY` — the feature adds precision where precision
+  exists and must never turn an unknown into a guess.
 - **`carousel_slides`' per-entry `formats` guard cannot be covered live.** It only runs once a video
   carousel's download has already failed, and no public URL sits in that state. The live all-video
   carousel in `SELF_CHECK_URLS` proves something weaker — that video carousels still belong to the
@@ -120,7 +133,13 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   album send dropping `connect_timeout` · `upload_ceiling` holding an album to 50 MiB · `_deliver`
   sizing an album by its first slide instead of its largest · a truncated carousel sent silently ·
   album slides picked by list order or delivered out of order · `ALBUM_MAX_ITEMS` not following
-  `telegram.constants.MediaGroupLimit`.
+  `telegram.constants.MediaGroupLimit` · `strip_ansi` made a no-op or dropped from
+  `rejection_record` · an `ANSI_ESCAPE` greedy enough to eat `[Instagram]` · `_apologise` ignoring
+  its detail, or `_deliver` not passing it · `failure_reply` matching with `any` instead of `all`,
+  losing its casefold or its strip · an unrecognised failure returning anything but `FAILURE_REPLY`
+  · one of the three hedged replies rewritten as a certainty · a `FAILURE_SIGNATURES` marker
+  written with a capital (it can then never fire) · a row added that no measured signature reaches
+  · the ledger storing the friendly reply instead of the raw detail.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.
@@ -153,6 +172,17 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   the end-to-end path needs two live instances on the real token.
 - **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked.
   Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to watch.
+- **Why yt-dlp coloured one ledger record and not the next is unknown**, and the search was stopped
+  on purpose after the TTY theory was refuted (pipe and pseudo-TTY both produced no escapes). The
+  strip is unconditional so the cause does not matter; do not gate it on a condition to "fix it
+  properly", and do not restart the hunt for a cosmetic defect.
+- **A failing YouTube link's real diagnosis is thrown away before the ledger sees it** (mechanism in
+  the bullet above). Deliberately unfixed: the fix changes which exception `_deliver` sees, which
+  is a delivery-path change, not a message change. Upgrade path: keep the original `DownloadError`
+  when the image fallback raises on a post that never was an image post.
+- **Only five failures are named; everything else is still `no pude bajar ese link`.** That is the
+  design, not a gap. A row costs a measurement against the live site — never a guess from an issue
+  tracker or from what an error "probably" says.
 - **`pool_timeout` is left at its 1.0 s default.** It governs contention for a 256-connection pool
   that a sequential bot never contends for.
 - **PTB processes updates sequentially**, so a slow upload blocks the handler for its duration. The

@@ -192,6 +192,65 @@ ALBUM_MAX_ITEMS = int(telegram.constants.MediaGroupLimit.MAX_MEDIA_LENGTH)
 
 FAILURE_REPLY = "no pude bajar ese link"
 
+# The failures the bot can NAME, and the Spanish line each one earns. Data: the
+# matcher is failure_reply() and never needs touching to add a row.
+#
+# Every row is a signature measured on 2026-08-09 by running download_into against
+# the live site -- NOT by reading `yt-dlp --simulate`, because the image fallback
+# rewrites some of those before they ever reach the group (see the note on the last
+# row). A failure nobody has actually seen does not get a row: guessing at the cause
+# is the thing this table exists to stop.
+#
+# A row is (markers, reply). ALL markers must appear, casefolded, in the failure
+# text; first row that matches wins, and the rows are disjoint today. Two markers
+# rather than one wherever the message alone is common prose -- the extractor tag
+# ("[facebook]", "[instagram:user]") is what pins the row to a host, and brackets
+# and colons are also what keep a marker from matching the pasted URL.
+#
+# HONESTY IS THE HARD PART. Three of these signatures do not carry the certainty a
+# reader would want, and the reply must not invent it:
+#   * Facebook's "Cannot parse data" is dead post OR Facebook throttling us. An
+#     earlier agent hit it on a perfectly good URL after five self-checks in 25
+#     minutes, so "ese post no existe" would be a confident lie ~half the time.
+#   * Instagram's empty media response is private, deleted, or auth-walled.
+#   * "no video and no downloadable image" is whatever the site refused to give.
+# Those three offer both possibilities and suggest what the friend can do.
+#
+# ponytail: these strings are upstream prose and they WILL drift -- yt-dlp rewords
+# its own errors between releases and Instagram rewords the sentence yt-dlp quotes.
+# The failure mode is deliberately the safe one: a reworded signature matches no row
+# and the group gets FAILURE_REPLY, which is exactly today's behaviour and never a
+# wrong specific answer. Drift shows up as rows that stop firing, and the ledger is
+# where the new wording is found, because it keeps the raw detail whatever was said.
+# Upgrade path when a row goes quiet: read `bot.py --rejected`, copy the new
+# sentence, add a row. Do not soften the markers to "catch more" -- a loose marker
+# is how a row starts firing on the wrong failure, which is the one outcome worse
+# than the generic apology.
+FAILURE_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
+    # instagram.com/reel/DbpG4CuSKoG/ -- the real bounce that prompted all of this.
+    (("this content isn't available to everyone",),
+     "ese post de instagram no es público, no me deja verlo"),
+    # instagram.com/reel/AAAAAAAAAAA/ -- also what an auth-walled post gives.
+    (("instagram sent an empty media response",),
+     "no puedo ver ese post de instagram: puede que sea privado o que ya no exista"),
+    # instagram.com/nasa/ -- a profile link instead of a post. The one row where the
+    # friend can fix it themselves, so the reply says how.
+    (("[instagram:user]", "unable to extract data"),
+     "ese link es de un perfil de instagram, no de un post: pasame el del reel o la foto"),
+    # facebook.com/watch/?v=999999999999999 -- dead post or throttling, no way to tell.
+    (("[facebook]", "cannot parse data"),
+     "no pude abrir ese link de facebook: puede que ya no exista o que facebook me esté "
+     "frenando. probá de nuevo en un rato"),
+    # youtube.com/watch?v=AAAAAAAAAAA and ?v=ZZZZZZZZZZZ, byte-identical for both.
+    # This is the bot's OWN sentence, not yt-dlp's: YouTube says "This video is
+    # unavailable", but that text never survives to here. _image_fallback's probe
+    # runs with ignore_no_formats_error and an unavailable YouTube video comes back
+    # with no formats and 38 thumbnails, so is_image_post() says True, the thumbnail
+    # download finds nothing, and ITS error replaces yt-dlp's. Measured 2026-08-09.
+    (("has no video and no downloadable image either",),
+     "no encontré nada para bajar en ese link: puede que lo hayan borrado o que sea privado"),
+)
+
 # Every supported link that does not end in delivered media is written here, one
 # JSON object per line, so the owner can ask "analizá todos los rebotados" later
 # instead of asking whichever friend was hosting to dig through a lost terminal.
@@ -421,7 +480,19 @@ def is_image_post(info: dict | None) -> bool:
     The other half of that guarantee is upstream, in yt-dlp: `ignore_no_formats_error`
     suppresses only the "No video formats" condition. Measured on 2026-08-07, an
     auth-walled reel and a bogus shortcode both still raised DownloadError with the
-    flag set, so a failed extraction never reaches this function at all.
+    flag set, so on Instagram a failed extraction never reaches this function at all.
+
+    That last sentence was written as "a failed extraction never reaches this function
+    at all", full stop, and it does NOT generalise off Instagram. Measured 2026-08-09:
+    an unavailable YouTube video (`watch?v=AAAAAAAAAAA`) does not raise under the flag
+    -- the probe returns no formats and 38 thumbnails, so this function says True, the
+    thumbnail fetch finds nothing downloadable, and the group correctly gets an
+    apology. The outcome is right and the diagnosis is not: yt-dlp's own "This video
+    is unavailable" is thrown away and replaced by _download_best_thumbnail's error,
+    which is what the ledger then records for every failing YouTube link. The cost is
+    38 pointless requests and a less useful ledger line, and fixing it means changing
+    which exception _deliver sees -- deliberately not done here. FAILURE_SIGNATURES
+    keys the YouTube row on the message that actually survives.
 
     Note what is NOT used here: `duration` is None for the image post AND for a
     working reel, and `title` is "Video by <author>" even for an image, because that
@@ -833,6 +904,27 @@ def oversize_reply(size_bytes: int, link: str) -> str:
     return f"pesa {megabytes:.0f} MB y Telegram no me deja subirlo. Te lo dejo acá: {link}"
 
 
+def failure_reply(detail: str) -> str:
+    """The Spanish line the group gets for a failure whose text is `detail`.
+
+    The logic half of FAILURE_SIGNATURES, and all of it: find the first row whose
+    markers are all present, else fall back to FAILURE_REPLY. Adding a failure the
+    bot can name is adding a row up there; nothing here changes.
+
+    Casefolded so a wording that only differs in capitals still matches, and the
+    escapes come off first so a coloured message classifies exactly like a clean one
+    -- the ledger already learned that lesson the expensive way.
+
+    Unrecognised is not a guess. Anything this does not recognise is still
+    "no pude bajar ese link", the same sentence it has always been.
+    """
+    haystack = strip_ansi(detail).casefold()
+    for markers, reply in FAILURE_SIGNATURES:
+        if all(marker in haystack for marker in markers):
+            return reply
+    return FAILURE_REPLY
+
+
 def album_truncation_note(total: int, sent: int) -> str:
     """The Spanish warning for a carousel longer than one album.
 
@@ -1169,10 +1261,13 @@ async def _deliver(message: telegram.Message, url: str) -> None:
     except Exception as exc:
         # Never a stack trace in the group. The real error goes to the log.
         log.exception("failed to deliver %s", url)
+        detail = str(exc)
         # Written before the apology so a network bad enough to kill both still
         # leaves the diagnosis behind. It cannot raise, so it cannot cost the apology.
-        record_rejection(message, url, type(exc).__name__, str(exc))
-        await _apologise(message)
+        # The ledger gets the RAW text whatever the group is told: the friendly line
+        # is for the chat, the detail is the owner's diagnosis and must not be lost.
+        record_rejection(message, url, type(exc).__name__, detail)
+        await _apologise(message, detail)
 
 
 async def _reply_text(message: telegram.Message, text: str) -> None:
@@ -1185,8 +1280,16 @@ async def _reply_text(message: telegram.Message, text: str) -> None:
     )
 
 
-async def _apologise(message: telegram.Message) -> None:
-    """Tell the group the link failed. This call may not raise, ever.
+async def _apologise(message: telegram.Message, detail: str = "") -> None:
+    """Tell the group the link failed, naming the cause when `detail` allows it.
+
+    `detail` is the failure's own text and is used only to pick the sentence --
+    nothing from it is ever quoted to the group, which would put a URL, an extractor
+    name or a stack fragment in front of people who cannot use any of them. With no
+    detail, or a detail nothing recognises, this is the generic apology it has always
+    been. See FAILURE_SIGNATURES for why some of those sentences hedge.
+
+    This call may not raise, ever.
 
     It is the last line of defence, so it is the one call that cannot itself be
     unprotected: a network bad enough to fail an upload is frequently bad enough to
@@ -1201,7 +1304,7 @@ async def _apologise(message: telegram.Message) -> None:
     honest destination left.
     """
     try:
-        await _reply_text(message, FAILURE_REPLY)
+        await _reply_text(message, failure_reply(detail))
     except Exception:
         log.exception("could not deliver the failure reply either; the group got nothing")
 
@@ -1665,6 +1768,158 @@ def _check_rejected_ledger() -> None:
     # Junk in the file must not crash the report the owner runs.
     assert format_rejections([{}, {"url": "not a url", "error": None}]), "junk records must render"
     print("ok  format_rejections groups by error class, then host")
+
+
+def _check_failure_replies() -> None:
+    """Each measured signature gets its own Spanish line; anything else stays generic.
+
+    Plain strings and no network on purpose. The details below are verbatim from
+    download_into run against the live sites on 2026-08-09 -- the exact text the bot
+    would record and classify. Reading them off `yt-dlp --simulate` instead would be
+    measuring a different string: on YouTube the image fallback replaces yt-dlp's
+    message with the bot's own before anything downstream ever sees it.
+
+    A check built on a broken remote post would break the day somebody restores or
+    deletes it, which is why nothing here fetches anything.
+    """
+    measured = {
+        "instagram, audience-restricted":
+            "yt-dlp could not download https://www.instagram.com/reel/DbpG4CuSKoG/: "
+            "ERROR: [Instagram] DbpG4CuSKoG: This content isn't available to everyone: "
+            "It can't be seen by certain audiences.",
+        "instagram, no such post":
+            "yt-dlp could not download https://www.instagram.com/reel/AAAAAAAAAAA/: "
+            "ERROR: [Instagram] AAAAAAAAAAA: Instagram sent an empty media response. "
+            "Check if this post is accessible in your browser without being logged-in. "
+            "If it is not, then use --cookies-from-browser or --cookies for the "
+            "authentication.",
+        "instagram, a profile URL not a post":
+            "yt-dlp could not download https://www.instagram.com/nasa/: "
+            "ERROR: [instagram:user] nasa: Unable to extract data; please report this "
+            "issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the "
+            "appropriate issue template.",
+        "youtube, unavailable (A)":
+            "https://www.youtube.com/watch?v=AAAAAAAAAAA has no video and no "
+            "downloadable image either",
+        "youtube, unavailable (Z)":
+            "https://www.youtube.com/watch?v=ZZZZZZZZZZZ has no video and no "
+            "downloadable image either",
+        "facebook, dead post or throttled":
+            "yt-dlp could not download https://www.facebook.com/watch/?v=999999999999999: "
+            "ERROR: [facebook] 999999999999999: Cannot parse data; please report this "
+            "issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the "
+            "appropriate issue template.",
+    }
+    replies = {label: failure_reply(detail) for label, detail in measured.items()}
+    for label, reply in replies.items():
+        assert reply != FAILURE_REPLY, f"{label} is measured and must be named, not generic"
+
+    # The two YouTube URLs are a deleted video and a nonexistent one and yt-dlp cannot
+    # tell them apart, so the bot must not pretend to either.
+    assert replies["youtube, unavailable (A)"] == replies["youtube, unavailable (Z)"], replies
+
+    # One line per row, no two rows sharing one, and every row reached by something
+    # measured. Tied to the table rather than to a literal, so adding a row keeps the
+    # invariant instead of updating a number.
+    named = set(replies.values())
+    assert len(named) == len(FAILURE_SIGNATURES), \
+        f"{len(FAILURE_SIGNATURES)} rows produced {len(named)} distinct lines: {named}"
+
+    # Nothing may be claimed that the signature does not carry. These three are
+    # ambiguous by measurement, so each has to offer both readings rather than pick.
+    for label in ("facebook, dead post or throttled", "instagram, no such post",
+                  "youtube, unavailable (A)"):
+        assert "puede que" in replies[label], f"{label} must hedge, it cannot know: {replies[label]}"
+    assert "probá de nuevo" in replies["facebook, dead post or throttled"], \
+        "throttling is temporary, so the facebook line has to say to retry"
+    assert "perfil" in replies["instagram, a profile URL not a post"], replies
+    assert "no es público" in replies["instagram, audience-restricted"], replies
+
+    # A friend reads these: Spanish, lower case, one line, no jargon and no codes.
+    for markers, reply in FAILURE_SIGNATURES:
+        assert reply == reply.lower(), f"the bot does not shout: {reply}"
+        assert len(reply) <= 120 and "\n" not in reply, f"one short line: {reply}"
+        assert not any(char.isdigit() for char in reply), f"no codes in the chat: {reply}"
+        for jargon in ("error", "http", "yt-dlp", "url", "extract"):
+            assert jargon not in reply, f"{jargon!r} means nothing to the group: {reply}"
+        # Markers are compared against a casefolded string, so a capital in the table
+        # is a row that can never fire -- silently, which is the worst way.
+        for marker in markers:
+            assert marker == marker.casefold(), f"marker must be casefolded: {marker!r}"
+
+    # Every row must be backed by something actually measured. A speculative row --
+    # a failure nobody has seen, mapped on a guess -- makes this go red.
+    for markers, reply in FAILURE_SIGNATURES:
+        assert reply in named, f"unmeasured row: nothing above produces {reply!r}"
+
+    # The unknown stays unknown. This is the half of the feature that is a promise.
+    assert failure_reply("simulated extractor failure") == FAILURE_REPLY
+    assert failure_reply("") == FAILURE_REPLY and failure_reply(None) == FAILURE_REPLY
+    assert failure_reply("yt-dlp could not download https://x/: ERROR: [Instagram] x: "
+                         "HTTP Error 429: Too Many Requests") == FAILURE_REPLY
+
+    # Drift: upstream rewords a sentence and the row stops matching. That must land on
+    # the generic apology and never on another row's answer.
+    assert failure_reply("ERROR: [Instagram] x: This content is not available to everyone: "
+                         "it cannot be seen by certain audiences.") == FAILURE_REPLY
+    assert failure_reply("ERROR: [facebook] 1: Could not parse the data") == FAILURE_REPLY
+    # Half a signature is not a signature: the extractor tag alone must not fire.
+    assert failure_reply("ERROR: [facebook] 1: Unable to extract data") == FAILURE_REPLY
+
+    # Capitals in yt-dlp's prose change nothing, and neither does colour: a coloured
+    # detail classifies exactly like the clean one. Both halves of this order meet here.
+    assert failure_reply(measured["facebook, dead post or throttled"].upper()) == \
+        replies["facebook, dead post or throttled"]
+    coloured = ("yt-dlp could not download https://www.instagram.com/reel/DbpG4CuSKoG/?igsh=...: "
+                "\x1b[0;31mERROR:\x1b[0m [Instagram] DbpG4CuSKoG: This content isn't available "
+                "to everyone: It can't be seen by certain audiences.")
+    assert failure_reply(coloured) == replies["instagram, audience-restricted"], failure_reply(coloured)
+    # The line above passes with or without the strip -- in the real record every
+    # escape happens to fall outside every marker, so it proves nothing on its own
+    # (mutation testing caught that; the assert was vacuous). This one is the case
+    # that needs the strip: colour landing INSIDE the sentence being matched. It is
+    # synthetic -- nobody has seen yt-dlp colour a message mid-word -- and it is here
+    # because the alternative to stripping is a row that silently stops firing.
+    straddled = ("ERROR: [Instagram] x: This content isn't \x1b[0;31mavailable\x1b[0m "
+                 "to everyone: It can't be seen by certain audiences.")
+    assert failure_reply(straddled) == replies["instagram, audience-restricted"], failure_reply(straddled)
+    print("ok  a failure the bot can name gets its own Spanish line")
+
+    # End to end through _deliver: the group hears the named line, and the ledger
+    # still gets the raw text. A wiring that drops the detail on the way to the
+    # apology passes every assert above and fails here.
+    class RecordingMessage:
+        chat_id = -100123
+        message_id = 77
+
+        def __init__(self) -> None:
+            self.said: list[str] = []
+
+        async def reply_text(self, text: str, **_kwargs: object) -> None:
+            self.said.append(text)
+
+    def _restricted_download(_url: str, _target_dir: Path) -> Media:
+        raise ExtractionError(measured["instagram, audience-restricted"])
+
+    real_download, real_ledger = globals()["download_into"], globals()["REJECTED_LEDGER"]
+    globals()["download_into"] = _restricted_download
+    with temp_workspace() as workspace:
+        globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+        try:
+            message = RecordingMessage()
+            with _capture_log(logging.ERROR):
+                asyncio.run(_deliver(message, "https://www.instagram.com/reel/DbpG4CuSKoG/"))
+            written = read_rejections(globals()["REJECTED_LEDGER"])
+        finally:
+            globals()["download_into"] = real_download
+            globals()["REJECTED_LEDGER"] = real_ledger
+
+    assert message.said == [replies["instagram, audience-restricted"]], message.said
+    assert len(written) == 1, written
+    assert "This content isn't available to everyone" in written[0]["detail"], written
+    assert replies["instagram, audience-restricted"] not in written[0]["detail"], \
+        "the ledger records the raw failure, not the sentence the group was told"
+    print("ok  _deliver tells the group the cause and still records the raw detail")
 
 
 def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
@@ -2166,6 +2421,7 @@ def _self_check() -> None:
     _check_send_timeouts()
     _check_message_logging()
     _check_rejected_ledger()
+    _check_failure_replies()
     _check_album_delivery()
     _check_failure_path()
     _check_conflict_handling()

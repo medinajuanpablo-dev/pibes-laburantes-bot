@@ -39,7 +39,8 @@ Telegram update
             │     │        → _send_album()   reply_media_group, open files, 2-10 slides
             │     └─ "link" → oversize_reply()  a Spanish message carrying the direct URL
             ├─ record_rejection()        anything that was not delivered lands in rejected.jsonl
-            └─ except → _apologise()     FAILURE_REPLY, with its own timeouts, never re-raises
+            └─ except → _apologise()     failure_reply() names the cause when it can, else
+                                         FAILURE_REPLY; own timeouts, never re-raises
 ```
 
 The split that matters: **everything above `_deliver` is pure and testable without a network or a
@@ -403,7 +404,7 @@ It groups by error class first, then by host, and lists every URL underneath. Th
 diagnosis: the class says what *kind* of thing is going wrong — one rotted extractor looks nothing
 like a run of files over the ceiling — and the host says where, which is usually the fix.
 
-Two things about the records:
+Three things about the records:
 
 - **The message body is never written**, only the URL. Same rule as the ignore-logging in item 2
   above — this is a private group and the URL is the whole diagnosis.
@@ -411,6 +412,14 @@ Two things about the records:
   there, so that record carries `OversizeForTelegram` and the byte count. It is deliberately in the
   ledger because a link reply is not the media, and because that path has still never run against
   Telegram (§6).
+- **`detail` is the raw failure text with terminal colour codes stripped**, and it stays raw
+  whatever the group was told — §5.2 changes the chat message, never the record. The strip is there
+  because one live record from 2026-08-09 carries yt-dlp's red `ERROR:` as the literal bytes
+  `\x1b[0;31mERROR:\x1b[0m` while a second record of the *same* failure nine minutes later carries
+  none. **What makes yt-dlp colour one run and not the next is not known.** The obvious theory — it
+  colours a terminal and not a pipe — was tested both ways and produced no escapes either time, so
+  it is refuted, not confirmed. `strip_ansi` therefore runs unconditionally: a fix behind a TTY
+  check would be a fix behind the wrong condition.
 
 **The ledger fragments across hosts, and that is accepted, not overlooked.** Each friend's machine
 records only the bounces it saw and nothing merges them. At ~20 links a week the owner reading his
@@ -419,6 +428,43 @@ The format is append-only lines, so `cat` is the merge. Do not build syncing for
 
 A failure to write the ledger is swallowed and logged: it is diagnostics bolted onto the failure
 path, and it may never cost the group its apology.
+
+### 5.2 What the group is told when a link bounces
+
+`FAILURE_SIGNATURES` maps a failure the bot can recognise to one Spanish line; `failure_reply()`
+matches, and anything it does not recognise is still `no pude bajar ese link`, exactly as before.
+The table is data and the matcher is logic — adding a failure is adding a row.
+
+Every row below is a signature measured on 2026-08-09 by running `download_into` against the live
+site. **Not** by reading `yt-dlp --simulate`: on YouTube those differ, see the last row.
+
+| What happened | Matched on | The group hears |
+|---|---|---|
+| Instagram post restricted by audience | `this content isn't available to everyone` | *ese post de instagram no es público, no me deja verlo* |
+| Instagram post gone, private or auth-walled | `instagram sent an empty media response` | *…puede que sea privado o que ya no exista* |
+| An Instagram **profile** URL, not a post | `[instagram:user]` + `unable to extract data` | *ese link es de un perfil…, pasame el del reel o la foto* |
+| Facebook post dead **or** Facebook throttling | `[facebook]` + `cannot parse data` | *…puede que ya no exista o que facebook me esté frenando. probá de nuevo en un rato* |
+| Nothing downloadable at all (in practice: a YouTube video that is deleted or private) | `has no video and no downloadable image either` | *…puede que lo hayan borrado o que sea privado* |
+
+**Three of those five hedge, and that is the rule, not a hesitation.** Facebook's `Cannot parse
+data` fires on a perfectly good URL under rate limiting — an earlier agent hit exactly that after
+five self-checks in 25 minutes — so "ese post no existe" would be a confident lie about half the
+time. YouTube cannot distinguish deleted from private: `watch?v=AAAAAAAAAAA` and `?v=ZZZZZZZZZZZ`
+produce byte-identical text. A reply may never claim more than its signature carries.
+
+**The last row matches the bot's own sentence, not YouTube's.** YouTube says *This video is
+unavailable*, and that text never survives: `_image_fallback`'s probe runs with
+`ignore_no_formats_error`, an unavailable video comes back with no formats and 38 thumbnails, so
+`is_image_post()` says yes, the thumbnail fetch finds nothing, and **its** error replaces yt-dlp's.
+So the ledger's line for a dead YouTube link is the bot's, and the row is keyed on what actually
+arrives. Costs 38 pointless requests per failing YouTube link; deliberately not fixed here, because
+fixing it means changing which exception `_deliver` sees.
+
+**These strings are upstream prose and they will drift.** The design makes drift fail safe: a
+reworded message matches no row and the group gets the generic apology, which is where it started.
+A row that stops firing shows up in the ledger, which keeps the raw text — copy the new sentence,
+add a row. Do not loosen a marker to "catch more": a loose marker firing on the wrong failure is
+the only outcome worse than the generic apology.
 
 ---
 
