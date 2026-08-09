@@ -37,6 +37,28 @@ bot accepted and then failed on is ever written down.** Two classes are invisibl
 The fourth row is not a gap: a message with no link in it is not a bounced link, and recording those
 would drown the ledger in ordinary chat.
 
+### A third blind spot, found by the previous agent and confirmed by me
+
+**Every failing YouTube link loses its real diagnosis before it reaches the ledger, and burns 38
+pointless network requests on the way.** The mechanism, measured: an unavailable YouTube video comes
+back from the fallback probe with **no formats and 38 thumbnails**, so `is_image_post()` returns
+True, `_download_best_thumbnail` fetches all 38, downloads nothing usable, and **its own error
+replaces yt-dlp's**. What lands in the ledger is the bot's sentence
+(`has no video and no downloadable image either`) instead of Instagram-style prose naming the cause.
+
+This also refuted a claim that was written in `bot.py`'s own docstring — *"a failed extraction never
+reaches this function at all"* — which had been measured on Instagram only and does not generalise.
+That docstring is already corrected on `main`; the behaviour is not.
+
+**Fix it in this order, as slice 0, before the other two** — it is the smallest of the three and the
+other two are worth less while the ledger is recording the wrong cause for a whole site. The guard
+you need is a discrimination `is_image_post()` currently cannot make: *no video formats* is not the
+same as *this is an image post*. Find a signal that separates them — 38 thumbnails and no image is
+not an image post — and make sure the original extraction error survives to the ledger.
+
+**Do not weaken the existing must-stay-red guard** (`formats` non-empty ⇒ not an image): that one
+protects a video whose formats failed from degrading into its poster frame, and it stays.
+
 ## WHY IT MATTERS
 
 The ledger is not a log, it is the input to a decision the owner will make later. A ledger that
