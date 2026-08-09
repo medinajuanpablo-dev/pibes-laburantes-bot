@@ -156,6 +156,13 @@ set +a
 # recovers. There is no side-effect-free way to ask Telegram "is anybody polling?".
 # A lock file is not the answer -- it would live on the wrong machine and go stale.
 # bot.py tolerates this blip on purpose (see the conflict handling there).
+#
+# The answer to the question below is the ONLY thing that tells two running instances
+# apart: Telegram hands both of them the same 409 and designates no winner, so without
+# it both give up and the group is left with no bot (README.md §4.9). Assigned here
+# rather than read from the environment, so nothing a previous run or the .env sourced
+# above could leave behind can turn a normal start into a take-over.
+TAKE_OVER=""
 say ""
 say "Fijándome si alguien más lo tiene prendido..."
 code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
@@ -171,7 +178,7 @@ case "$code" in
         printf '¿Se lo saco y lo prendo yo? [s/n] '
         read -r answer
         case "$answer" in
-            s|S|si|Si|SI|y|Y|yes) say "Dale, se lo saco." ;;
+            s|S|si|Si|SI|y|Y|yes) say "Dale, se lo saco."; TAKE_OVER="--take-over" ;;
             *) say "Perfecto, no toco nada. Cerrá esta ventana."; exit 0 ;;
         esac
         ;;
@@ -195,4 +202,9 @@ say "El bot está prendido. Dejá esta ventana abierta."
 say "Para apagarlo: apretá Control-C, o cerrá la ventana."
 say "Ojo: cuando lo apagues, el grupo se queda sin bot hasta que alguien lo prenda."
 say ""
+# Two branches rather than an unquoted expansion: an empty "$TAKE_OVER" would be an
+# empty argument, and bash 3.2 has no arrays to do this tidily.
+if [ -n "$TAKE_OVER" ]; then
+    exec "$VENV_PY" bot.py "$TAKE_OVER"
+fi
 exec "$VENV_PY" bot.py

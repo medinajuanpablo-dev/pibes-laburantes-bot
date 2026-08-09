@@ -137,6 +137,30 @@ TEXT_REPLY_TIMEOUT = 60  # seconds
 CONFLICT_GRACE = 60.0  # seconds
 CONFLICT_EPISODE_GAP = 45.0  # seconds
 
+# Telegram provides no asymmetry: two pollers on one token both get 409, so two
+# instances running the same rule reach the same conclusion and both give up --
+# measured on 2026-08-09, and it left the group with no bot at all (README.md §4.9).
+# The asymmetry has to be injected from outside, and the product already collects it:
+# the launcher asks "somebody else has it, shall I take it?" and passes this flag when
+# the person says yes. Nothing else in the repository sets it, so a normal start is
+# byte-for-byte the start it was before this existed.
+TAKE_OVER_FLAG = "--take-over"
+
+# How long that declared intent lasts, counted from this process's start. It exists
+# so the baton can be passed twice: without an expiry, the friend who took the bot at
+# 18:00 would refuse to yield it at 20:00 and only the first hand-over of the day
+# would work. It has to comfortably outlast the incumbent's CONFLICT_GRACE, because
+# the intent must still be live when the hand-over conflict starts -- which is within
+# a second or two of startup, so twice the grace is already generous.
+TAKE_OVER_WINDOW = 120.0  # seconds
+
+# How long a taking-over instance keeps quiet before it says the hand-over is not
+# going through. Past this, the other side is not an incumbent of this build -- an
+# incumbent yields at CONFLICT_GRACE -- so it is most likely a second person who also
+# answered yes. Three times the grace: long enough that a yielding incumbent is
+# always gone first, short enough that somebody watching the window still learns why.
+CONFLICT_STANDOFF = 180.0  # seconds
+
 # The three sites the group actually pastes. Anything else is left alone rather than
 # attempted and apologised for -- a bot that answers "no pude bajar ese link" to every
 # news article in the chat is worse than one that stays quiet.
@@ -1067,8 +1091,28 @@ def album_truncation_note(total: int, sent: int) -> str:
     )
 
 
+def take_over_requested(argv: Sequence[str]) -> bool:
+    """True when this instance was started to take the bot away from somebody else.
+
+    An argument rather than an environment variable on purpose. `bot.py` already owns
+    a small command line (`--self-check`, `--rejected`), so the intent joins the
+    channel that exists instead of inventing a second one; it cannot be inherited by
+    accident from a shell, or from the `.env` the macOS launcher exports wholesale
+    with `set -a`; and it is per-invocation by construction, which is exactly what an
+    intent declared once, at one double-click, is.
+
+    Anything that is not the flag -- nothing, a typo, a value glued onto it -- is a
+    normal start. The unclear reading has to be the yielding one: an instance that
+    wrongly believes it was told to take over never gives the baton back.
+    """
+    return TAKE_OVER_FLAG in argv
+
+
 def conflict_action(
-    now: float, started: float | None, last: float | None
+    now: float,
+    started: float | None,
+    last: float | None,
+    take_over_until: float | None = None,
 ) -> tuple[str, float | None, float | None]:
     """Decide what a poll conflict at `now` means, given the episode so far.
 
@@ -1330,6 +1374,12 @@ async def on_message(update: telegram.Update, _context: object) -> None:
 _conflict_started: float | None = None
 _conflict_last: float | None = None
 
+# The monotonic time until which this instance was told to take the bot over, or None
+# on a normal start. Set once in main() from the command line and never changed after,
+# so the rule that reads it -- conflict_action -- still takes it as an argument and
+# stays pure.
+_take_over_until: float | None = None
+
 
 async def on_error(_update: object, context: object) -> None:
     """Turn a poll-level failure into something the person hosting the bot can act on.
@@ -1524,9 +1574,18 @@ def build_application(token: str) -> Application:
 
 
 def main() -> None:
+    global _take_over_until
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if not ffmpeg_path():
         log.warning("ffmpeg is not on PATH; merged-quality downloads will fail")
+    if take_over_requested(sys.argv[1:]):
+        _take_over_until = time.monotonic() + TAKE_OVER_WINDOW
+        log.info(
+            "told to take the bot over: a conflict starting in the next %.0f s will not stop this "
+            "instance (see README.md: the baton pass)",
+            TAKE_OVER_WINDOW,
+        )
     app = build_application(read_token())
     log.info("polling; privacy mode must be OFF for the bot to see plain links (see README.md)")
     log.info("only one instance can poll this token at a time (see README.md: the baton pass)")
@@ -2729,6 +2788,60 @@ def _check_failure_path() -> None:
     print("ok  _deliver swallows a failing download AND a failing apology, and records it")
 
 
+def _check_take_over_intent() -> None:
+    """The launcher's answer has to reach the bot, and nothing else may look like it.
+
+    That flag is the only thing that tells two instances of this file apart (§4.9), so
+    both halves are asserted: that a declared take-over is read, and that a normal
+    start -- or a typo -- is never mistaken for one. A false positive is the worse of
+    the two, because an instance that wrongly believes it was told to take over never
+    gives the baton back.
+    """
+    assert take_over_requested([TAKE_OVER_FLAG]) is True, "the flag must be read"
+    assert take_over_requested(["--self-check", TAKE_OVER_FLAG]) is True, "position must not matter"
+    assert take_over_requested([]) is False, "a normal start is not a take-over"
+    assert take_over_requested(["--self-check"]) is False, "another flag is not a take-over"
+    for junk in ("--takeover", "--take-over=yes", "--TAKE-OVER", "take-over", "-take-over", ""):
+        assert take_over_requested([junk]) is False, f"{junk!r} must not read as a take-over"
+
+    # And it has to arrive: main() is what turns the flag into the deadline on_error
+    # reads, so it is driven here rather than asserted as a constant that agrees with
+    # itself. Nothing reaches the network -- build_application is replaced first, and
+    # the token below is a shaped fake.
+    class PollRecordingApplication:
+        def run_polling(self, **_kwargs: object) -> None:
+            pass
+
+    global _take_over_until
+    saved_intent = _take_over_until
+    saved_argv = sys.argv
+    real_build = globals()["build_application"]
+    globals()["build_application"] = lambda _token: PollRecordingApplication()
+    previous = os.environ.get(TOKEN_ENV_VAR)
+    os.environ[TOKEN_ENV_VAR] = "123456:AAHnot-a-real-token-nothing-is-sent"
+    try:
+        for argv, wanted in (
+            (["bot.py"], False),
+            (["bot.py", "--takeover"], False),
+            (["bot.py", TAKE_OVER_FLAG], True),
+        ):
+            _take_over_until = None
+            sys.argv = argv
+            main()
+            assert (_take_over_until is not None) is wanted, (argv, _take_over_until)
+        remaining = _take_over_until - time.monotonic()  # type: ignore[operator]
+        assert 0.0 < remaining <= TAKE_OVER_WINDOW, remaining
+    finally:
+        sys.argv = saved_argv
+        globals()["build_application"] = real_build
+        _take_over_until = saved_intent
+        if previous is None:
+            del os.environ[TOKEN_ENV_VAR]
+        else:
+            os.environ[TOKEN_ENV_VAR] = previous
+    print("ok  the launcher's take-over answer reaches the bot, and nothing else does")
+
+
 def _check_conflict_handling() -> None:
     """One line per conflict episode, a clean stop only when it is sustained.
 
@@ -2867,6 +2980,7 @@ def _self_check() -> None:
     _check_unattempted_links_are_recorded()
     _check_album_delivery()
     _check_failure_path()
+    _check_take_over_intent()
     _check_conflict_handling()
     _check_startup_drops_the_backlog()
     _check_extraction()

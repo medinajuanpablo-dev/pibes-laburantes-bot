@@ -20,6 +20,11 @@ setlocal
 title the-bot
 cd /d "%~dp0"
 
+rem setlocal copies the environment this window was opened with, so the take-over
+rem answer is cleared here on purpose: nothing outside this run may make a normal
+rem start look like somebody taking the bot from another person.
+set "TAKEOVER="
+
 set "PYTHON_URL=https://www.python.org/downloads/windows/"
 set "FFMPEG_URL=https://www.gyan.dev/ffmpeg/builds/"
 
@@ -165,11 +170,18 @@ echo.
 echo Justo ahora lo tiene prendido otra persona, y Telegram deja UNA SOLA a la vez.
 set "ANSWER="
 set /p "ANSWER=Se lo saco y lo prendo yo? [s/n] "
-if /i "%ANSWER%"=="s" goto :run
-if /i "%ANSWER%"=="si" goto :run
-if /i "%ANSWER%"=="y" goto :run
+if /i "%ANSWER%"=="s" goto :takeover
+if /i "%ANSWER%"=="si" goto :takeover
+if /i "%ANSWER%"=="y" goto :takeover
 echo Perfecto, no toco nada. Podes cerrar esta ventana.
 goto :done
+:takeover
+rem The only thing that tells two running instances apart: Telegram hands both of
+rem them the same 409 and designates no winner, so without this answer both give up
+rem and the group is left with no bot (README.md seccion 4.9).
+set "TAKEOVER=--take-over"
+echo Dale, se lo saco.
+goto :run
 :badtoken
 echo.
 echo Telegram rechazo ese token. Pedile el bueno al dueno.
@@ -183,7 +195,8 @@ echo El bot esta prendido. Deja esta ventana abierta.
 echo Para apagarlo: apreta Control-C, o cerra la ventana.
 echo Ojo: cuando lo apagues, el grupo se queda sin bot hasta que alguien lo prenda.
 echo.
-"%VENV_PY%" bot.py
+rem %TAKEOVER% is empty on a normal start, and an empty expansion adds no argument.
+"%VENV_PY%" bot.py %TAKEOVER%
 
 :done
 echo.
