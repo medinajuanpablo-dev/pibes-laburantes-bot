@@ -1457,7 +1457,10 @@ async def on_error(_update: object, context: object) -> None:
             "taking the poll over as instructed; the other instance should yield within %.0f s",
             CONFLICT_GRACE,
         )
-        print("Se lo estoy sacando a quien lo tenía prendido. Puede tardar hasta un minuto.")
+        # "un minuto o dos", not "un minuto": CONFLICT_GRACE is a floor and PTB's
+        # backoff decides when the conflict that crosses it is actually judged, which
+        # measured 65 s and 74 s on the two instances of 2026-08-09.
+        print("Se lo estoy sacando a quien lo tenía prendido. Puede tardar un minuto o dos.")
         return
     if action == "stand-ground":
         # Nothing here can arbitrate: the hosts are different laptops and Telegram
@@ -2953,14 +2956,14 @@ def _check_conflict_handling() -> None:
 
     # --- The same conflicts, read by the side that was told to take the bot --------
     # Monotonic 0.0 is this process's start, so the answer the person gave at the
-    # launcher covers everything up to TAKE_OVER_WINDOW.
-    # Every conflict below is dated from 1 s in, not from 0.0: polling starts after
-    # the process does, so a timeline that began exactly at the deadline would let a
-    # zero-length window -- an intent that is never live for anything -- pass.
+    # launcher covers everything up to TAKE_OVER_WINDOW. Every conflict below is dated
+    # from 1 s in rather than from 0.0, because polling starts after the process does:
+    # a timeline beginning exactly at the deadline would let a zero-length window --
+    # an intent that is never live for anything at all -- pass.
     taking_over_until = TAKE_OVER_WINDOW
 
-    # The launcher's own probe against an instance that took the bot a minute ago:
-    # one line, no stop, exactly as tolerant as any other instance.
+    # The launcher's own probe against an instance that took the bot moments ago: one
+    # line, no stop, exactly as tolerant as any other instance.
     started = last = None
     actions = []
     for moment in (1.0, 2.0, 3.5, 5.7, 9.1, 11.0):

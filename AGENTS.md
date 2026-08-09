@@ -72,6 +72,19 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `CONFLICT_GRACE`. Exiting on the first one would make the question a remote kill switch, and
   `CONFLICT_EPISODE_GAP` must stay above python-telegram-bot's retry backoff, capped at 30 s.
   Numbers and method: `README.md` §4.9.
+- **Two instances of the old build both quit, and the group was left with no bot** — measured
+  2026-08-09, the first time the hand-over was ever run for real. `getUpdates` designates no winner:
+  it terminates whichever long poll is outstanding, so both sides observe the same sustained
+  conflict, and a symmetric rule made both of them conclude they had lost. **The asymmetry cannot
+  come from Telegram and there is nothing else between the two hosts** — different laptops, no
+  shared state — so it is injected from the one place a human states an intent: the launcher's
+  *"¿Se lo saco?"*, carried in as `--take-over`. Three consequences are load-bearing and each has a
+  mutation on the list below: the role is fixed at the **episode's start** (an intent expiring
+  mid-conflict would flip a standing instance back onto the give-up path and reproduce the bug two
+  minutes later); the intent **expires**, or only the first hand-over of the day would work; and the
+  taking-over side **never stops**, because that is the only rule that cannot end with nobody
+  polling. Two people who both answer yes get an erratic bot and a Spanish line asking one of them
+  to close the window — the people are the tie-break, since nothing in the system can be.
 - **`drop_pending_updates=True` is a decision, not a default.** Telegram holds updates ~24 h and
   every handover follows a gap in which nobody hosted, so replaying the queue dumps the whole gap
   into the group at once. The accepted cost is that a link posted while the bot was off is lost.
@@ -132,6 +145,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   that same branch declining when an image *did* come down (an image post must still be sent) · `main` not registering `on_error` · the conflict handler's `quiet` branch ·
   `CONFLICT_GRACE` set to 0 (a probe would then kill a healthy bot) · the episode reset in
   `conflict_action` · the Spanish line the person at the window reads ·
+  `take_over_requested` reading nothing, reading everything, or matching loosely enough that a typo
+  starts an instance that will never give the baton back · `main` not turning the flag into the
+  deadline, or `on_error` not passing it to `conflict_action` · `conflict_action` ignoring the
+  intent (that is exactly the 2026-08-09 bug) · the role read from `now` instead of the episode's
+  start · the intent never expiring · `TAKE_OVER_WINDOW` set to 0, so the intent is never live for
+  anything · `stand-ground` said on every conflict, on none, or falling through into the stop ·
+  the taking-over side reading the incumbent's line, which tells the person the opposite of what
+  they just asked for · the give-up line losing its hedge or its "open this again" way back ·
   `run_polling` losing `drop_pending_updates` ·
   either `record_rejection` call site in `_deliver` · a ledger write failure escaping · the ledger
   recording the message body · `on_message` not recording an unsupported host at all, recording only
@@ -193,8 +214,16 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **Nobody has watched python-telegram-bot hand a `Conflict` to `on_error`.** The rule and the
   handler are asserted, and the library's own code routes polling errors to `process_error`, but
   the end-to-end path needs two live instances on the real token.
-- **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked.
-  Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to watch.
+- **The fixed hand-over has not been run end to end.** Both roles are driven over a simulated
+  timeline and every branch of the launcher's probe was driven with its real lines, but two
+  instances on one token is the owner's experiment, not something a check can reach. What it has to
+  confirm: the taker survives the incumbent's 60 s, the incumbent stops with the new sentence, and
+  `getUpdates` afterwards shows **somebody** polling. The two-people-both-say-yes standoff is even
+  further from cover — it needs three machines or two runs of the launcher answered yes twice.
+- **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked —
+  including its `--take-over` path, which is the mirror of the macOS one whose branches *were*
+  driven. Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to
+  watch.
 - **Why yt-dlp coloured one ledger record and not the next is unknown**, and the search was stopped
   on purpose after the TTY theory was refuted (pipe and pseudo-TTY both produced no escapes). The
   strip is unconditional so the cause does not matter; do not gate it on a condition to "fix it

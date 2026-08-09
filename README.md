@@ -71,7 +71,8 @@ token.** That is what makes the self-check possible.
 | `oversize_reply(bytes, link)` | the Spanish fallback message |
 | `album_truncation_note(total, sent)` | the Spanish warning for a carousel longer than one album |
 | `rejection_record(...)` / `format_rejections(records)` | one ledger line, and the grouped report — §5.1 |
-| `conflict_action(now, started, last)` | `announce` · `quiet` · `give-up` for a poll conflict — §2.1 |
+| `take_over_requested(argv)` | whether this instance was told to take the bot from somebody else — §4.9 |
+| `conflict_action(now, started, last, take_over_until)` | `announce` · `take-over` · `quiet` · `stand-ground` · `give-up` for a poll conflict — §2.1 |
 
 ---
 
@@ -100,6 +101,11 @@ nohup .venv/bin/python bot.py > ~/the-bot.log 2>&1 &
 `tmux` or `screen` work equally well. **There is deliberately no `systemd` unit and no `launchd`
 plist in this repo** — see §6.
 
+Add `--take-over` to that command to reclaim the bot from a friend who is hosting it: it is the same
+declaration the launcher collects with its `[s/n]` question, and it is what stops this instance from
+yielding the moment it meets the other one (§2.1, §4.9). Without it, starting a second instance is
+how the group ends up with no bot at all.
+
 ### 2.1 The baton pass
 
 The owner cannot keep his laptop on all the time, so hosting rotates: whoever is around
@@ -112,7 +118,11 @@ already polling, and prints one Spanish sentence per failure. The friend-facing 
 Three things follow from the design and are not obvious:
 
 - **Only one person can host at a time.** Telegram allows exactly one poller per token (§4.9), so
-  this is a baton pass, not parallelism. The launcher asks before taking over.
+  this is a baton pass, not parallelism. The launcher asks before taking over, **and the answer is
+  the only thing that tells the two running instances apart**: an `s` runs `bot.py --take-over` and
+  that instance keeps polling through the conflict, while the one nobody told anything yields after
+  60 s. Both sides read the identical HTTP 409, so without that flag both conclude they lost and the
+  group is left with no bot at all — measured on 2026-08-09, §4.9.
 - **Distribution is `git clone`, never a downloaded zip**, and that is also the update channel: each
   launcher runs `git pull --ff-only` on startup, so the owner pushes and every friend gets the
   change on their next double-click. It also side-steps Gatekeeper entirely — a file written by git
@@ -332,10 +342,61 @@ would turn the question into a remote kill switch. `CONFLICT_GRACE` (60 s) is si
 blip; `CONFLICT_EPISODE_GAP` (45 s) is above python-telegram-bot's own retry backoff, which grows
 1.5× per failure and is **capped at 30 s** (`telegram/ext/_utils/networkloop.py`).
 
+#### Two instances, measured 2026-08-09 — and why the hand-over needs a flag
+
+The first run of the real thing, one host taking the baton from another on the real token:
+
+| time | what happened |
+|---|---|
+| 18:23:54 | host B starts, taking the baton |
+| 18:23:55 | A logs `another instance has taken the poll` |
+| 18:23:59 | B logs the same line |
+| 18:25:04 | B stops: *"El bot ahora lo tiene otra persona. Podés cerrar esta ventana."* |
+| 18:25:09 | A stops, with that same sentence |
+| after | `getUpdates` answers 200: **nobody is polling.** The group has no bot, and both people were told the other one had it |
+
+Everything in that run behaved as designed except the conclusion: one warning per episode, silence
+through the retries, no tracebacks in either process, and each side stopping only after its own
+grace had passed — 65 s for B and 74 s for A, counted from its own first conflict. `CONFLICT_GRACE`
+is a floor, not a deadline: python-telegram-bot's backoff decides when the next conflict arrives to
+be judged, and that adds up to 30 s on top.
+
+**Telegram provides no asymmetry, so it has to come from outside.** `getUpdates` does not designate
+a winner: it terminates whichever long poll is outstanding when a new one arrives, so both instances
+observe the same sustained conflict. Same code, same inputs, same conclusion — with a symmetric rule
+mutual give-up is the *only* possible outcome, and it is the worst one available.
+
+The one place in the product where somebody states an intent is the launcher's *"¿Se lo saco y lo
+prendo yo? [s/n]"*. An `s` now runs `bot.py --take-over`; every other path runs `bot.py` exactly as
+before. `conflict_action` reads that intent and the two sides diverge:
+
+| the same conflict, lasting… | told to take over | not told |
+|---|---|---|
+| its first moment | *"Se lo estoy sacando a quien lo tenía prendido…"* | *"Otra persona prendió el bot…"* |
+| `CONFLICT_GRACE`, 60 s | keeps polling | stops, and says so |
+| `CONFLICT_STANDOFF`, 180 s | says once that the other side is not yielding, and keeps polling | — |
+
+Three rules make that safe, and the self-check drives all three:
+
+- **The role is fixed when the episode starts**, never re-read on later conflicts. The intent expires
+  (`TAKE_OVER_WINDOW`, 120 s from startup, twice the incumbent's grace), and an expiry landing in the
+  middle of a conflict would otherwise flip a standing-ground instance back onto the give-up path —
+  both sides quitting again, two minutes later.
+- **The intent does expire**, so the friend who took the bot at 18:00 is an ordinary incumbent by
+  18:30 and yields to the next person like anybody else. Without an expiry only the first hand-over
+  of the day would work.
+- **The taking-over side never stops.** No path may end with nobody polling, and that is the only
+  rule that guarantees it. Two people who both answer `s` therefore end up with two instances
+  knocking each other off — a bot that works erratically, not a group without one — and both windows
+  say so in Spanish and ask that one of them close. Nothing here can arbitrate: different laptops,
+  no shared state, and Telegram refuses (§6).
+
 Not verified without a second live instance: that python-telegram-bot delivers the `Conflict` to the
 registered error handler at all. The path is asserted from `conflict_action` up to `on_error`, and
 the library's own code says it does (`Application.run_polling` passes an `error_callback` that feeds
-`process_error`), but nobody has watched it happen.
+`process_error`), but nobody has watched it happen. **And the fixed hand-over has not been run
+end to end either**: the check drives both roles over a simulated timeline, which is the whole of a
+pure function and none of a second laptop.
 
 ### 4.10 Instagram carousels
 
@@ -445,7 +506,9 @@ their pages without warning, and that is this project's real failure mode.
 6. **The log says `another instance has taken the poll`** → somebody else opened a launcher. One
    line means somebody merely *asked* whether the bot was running and this instance recovered;
    `the conflict lasted 60 s` means the handover was real and this instance stopped on purpose.
-   §2.1 and §4.9.
+   `taking the poll over as instructed` is the other side of the same event, on the instance that
+   was told to take the bot. `still conflicting after 180 s` means two people both answered yes:
+   nothing will resolve it by itself, and one of the two windows has to be closed. §2.1 and §4.9.
 
 ### 5.1 The rejected-links ledger
 
@@ -556,6 +619,7 @@ a preference.
 | Auto-start for the launcher — a LaunchAgent, a Startup shortcut | The baton pass is manual on purpose. Two friends who each installed one would quietly re-create the 409 problem every morning, with nobody at the keyboard to answer the question the launcher asks. |
 | A cross-platform launcher, a Python bootstrapper, a shared config for the two scripts | Two ~100-line scripts that each read plainly in their own idiom beat one clever thing neither platform's user can debug. |
 | A lock file to answer "is anybody hosting?" | It would live on the wrong machine and go stale. Telegram's own 409 is the only authority, and asking costs one conflict (§4.9). |
+| A tie-break between two instances that were both told to take over | There is no channel to hold it on: different laptops, different networks, no shared state, and Telegram designates no winner (§4.9). A negotiation over the group chat would be visible to the friends and could still race. The two people can talk to each other; their bots cannot — so the standoff is announced in both windows and left to them. |
 | A JS runtime (`deno`, wiring `node`) | Extraction works without one today, measured. The port target argues against a new runtime dependency added to silence a warning. |
 | A local Telegram Bot API server for 2 GB uploads | Compiling tdlib for a ceiling meme-length clips rarely reach. |
 | TikTok support | Not requested, and the IP was blocked when it was probed. |

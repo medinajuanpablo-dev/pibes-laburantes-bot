@@ -7,7 +7,8 @@ El bot **solo funciona mientras alguien lo tiene prendido en su compu**. Por eso
 el que está a mano lo prende, y cuando lo apaga el grupo se queda sin bot hasta que lo prenda otro.
 
 **Solo una persona a la vez.** Telegram no deja que dos lo tengan prendido al mismo tiempo. Si
-alguien más lo tiene, el programa te avisa y te pregunta si se lo querés sacar.
+alguien más lo tiene, el programa te avisa y te pregunta si se lo querés sacar. **Contestá esa
+pregunta con cuidado**: es lo único que decide con quién se queda el bot.
 
 ---
 
@@ -65,8 +66,16 @@ Para apagarlo: apretá **Control-C** en esa ventana, o cerrala.
 **Lo que se postea mientras nadie lo tiene prendido no llega.** No se acumula para después: si
 pegaste un link con el bot apagado, pegalo de nuevo cuando alguien lo prenda.
 
-Si en la ventana aparece **"Otra persona prendió el bot"**, es exactamente eso: alguien lo prendió y
-te lo sacó. Es normal, no rompiste nada. Al ratito el bot se apaga solo y podés cerrar la ventana.
+En la ventana pueden aparecer tres avisos sobre esto, y quieren decir cosas distintas:
+
+- **"Otra persona prendió el bot..."** — alguien más lo prendió y te lo está sacando. Es normal, no
+  rompiste nada: en un minuto o dos el tuyo se apaga solo y te avisa que podés cerrar la ventana.
+  Ese último aviso dice *"parece que"* a propósito: el bot no puede ver la compu del otro. Si
+  después resulta que nadie lo tiene prendido, volvé a abrir el archivo y prendelo vos.
+- **"Se lo estoy sacando a quien lo tenía prendido"** — este es el aviso del que contestó que sí.
+  Esperá un minuto o dos: al otro se le apaga y te queda a vos.
+- **"...ninguno de los dos afloja"** — lo prendieron dos a la vez y los dos dijeron que sí. Eso no
+  se arregla solo: hablen y que uno cierre la ventana. Mientras tanto el bot anda a los saltos.
 
 ---
 
@@ -98,9 +107,10 @@ segundos cuando alguien pega un link.
 **¿Puedo apagarlo cuando quiera?** Sí, cuando quieras, sin avisar. El grupo se queda sin bot hasta
 que otro lo prenda.
 
-**¿Y si lo prendemos dos al mismo tiempo?** No se puede: el segundo te avisa que ya está prendido y
-te pregunta si se lo querés sacar. Al que se lo sacaste, la ventana le avisa y el bot se le apaga
-solo.
+**¿Y si lo prendemos dos al mismo tiempo?** El segundo te avisa que ya está prendido y te pregunta
+si se lo querés sacar. Si decís que sí, se lo sacás: al otro le avisa la ventana y se le apaga solo
+en un minuto o dos. Si dicen que sí los dos a la vez, no se apaga ninguno y el bot anda a los
+saltos hasta que uno cierre su ventana; las dos ventanas lo avisan.
 
 **El bot no responde a un link.** Puede ser que sea de un sitio que no maneja (solo YouTube,
 Instagram y Facebook), o que el link no arranque con `http`. También puede ser que nadie lo tenga
