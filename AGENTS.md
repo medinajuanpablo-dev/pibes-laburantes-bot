@@ -114,11 +114,19 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **`drop_pending_updates=False` is a decision, not a default.** Telegram holds updates ~24 h and
   every handover follows a gap in which nobody hosted, so the queue is replayed rather than dropped:
   a link posted while nobody hosted still arrives. Chosen by the owner 2026-08-10, the burst it was
-  avoiding having measured **7 updates**. Two accepted costs: the arrivals can be hours old, and **a
-  baton pass may repeat the newest link**, because the yielding instance cannot acknowledge its last
-  batch through the same 409 that made it yield. **No age filter, and no de-duplication** — the
-  latter would need `update_id` state persisted across runs, and the owner already killed one
-  in-memory queue for exactly that reason.
+  avoiding having measured **7 updates**; **proven live the same day** — a reel posted into a real
+  7-minute gap was delivered 4 s after startup. The accepted cost is that the arrivals can be hours
+  old. **No age filter, and no de-duplication** — the latter would need `update_id` state persisted
+  across runs, and the owner already killed one in-memory queue for exactly that reason.
+  - **A baton pass does NOT repeat the last link, and the plausible argument that it does was
+    refuted by measurement.** The reasoning was: the yielding instance cannot acknowledge its last
+    batch, because its shutdown `getUpdates` meets the same 409 that made it yield. **Measured
+    2026-08-10 with a real taker polling: that call returns HTTP 200, `ok:true`.** It does not 409 —
+    a `timeout=0` `getUpdates` *displaces* the other poller for an instant and wins, which is the
+    same mechanism that makes the launcher's probe steal a live poll (§4.9). Two independent signals
+    agree: the direct call succeeds, and the yielding side's log carries **no** PTB
+    *"updates may be fetched again"* warning. Do not re-add the duplicate to the docs without a
+    measurement that beats those two.
 - **A downloaded `.command` cannot be double-clicked, and it takes two independent things to make
   one that can.** It needs the exec bit **and** no `com.apple.quarantine`; a download has neither.
   All four combinations were measured on 2026-08-09 (macOS 15.1.1), along with what Telegram

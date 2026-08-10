@@ -161,10 +161,18 @@ Three things follow from the design and are not obvious:
   at startup**, oldest first and one at a time. Telegram only holds updates for ~24 h, so a gap
   longer than that still loses the older end of it. Measured with nobody running: 7 updates queued,
   2 of them reels — that is the size of backlog a handover recovers, not a flood. Chosen 2026-08-10
-  over the previous behaviour, which dropped the queue and told nobody. Two consequences worth
-  knowing: the arrivals are not new messages, so they can be minutes or hours old; and a baton pass
-  (above) may repeat the newest link, because the yielding instance cannot acknowledge its last
-  batch through the 409 that made it yield.
+  over the previous behaviour, which dropped the queue and told nobody. **Proven live the same day:**
+  a reel posted into a real 7-minute gap was delivered 4 s after the bot started. One consequence
+  worth knowing: the arrivals are not new messages, so they can be minutes or hours old.
+
+  A second consequence was argued and then **refuted by measurement**, and it is recorded here so
+  nobody re-derives it: a baton pass does **not** repeat the newest link. The argument was that the
+  yielding instance cannot acknowledge its last batch, because its shutdown `getUpdates` meets the
+  same 409 that made it yield. Measured with a real taker polling, that call returns **HTTP 200,
+  `ok:true`** — a `timeout=0` `getUpdates` displaces the other poller for an instant and wins, the
+  same mechanism that lets the launcher's probe steal a live poll (§4.9). The yielding side's log
+  also carries no python-telegram-bot *"updates may be fetched again"* warning, which is the second,
+  independent signal.
 
 The owner's workflow is `docs/updating.md`. Nothing else here changes: `python bot.py` above is
 still the way the owner runs it, and the launcher is a convenience wrapped around exactly that.
