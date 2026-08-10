@@ -670,6 +670,21 @@ class ExtractionError(Exception):
     """The media could not be downloaded. The message is for the log, not the group."""
 
 
+class LiveStreamError(ExtractionError):
+    """The link is a stream happening right now, so there is no end to download.
+
+    Its own class because it is the one refusal the bot decides ITSELF rather than
+    reads off the site, and _apologise picks the group's line from the class. It also
+    makes the ledger say `LiveStreamError` instead of burying a whole category of
+    refusal inside the generic bounce pile.
+
+    A subclass of ExtractionError rather than a sibling so that nothing on the
+    delivery path needs to learn about it: _deliver's `except Exception` already
+    catches it, record_rejection already writes `type(exc).__name__`, and the ledger
+    gets the new class for free. Only the sentence is new.
+    """
+
+
 class Media(NamedTuple):
     path: Path
     has_audio: bool
@@ -774,9 +789,52 @@ def is_live_stream(info: dict | None) -> bool:
     return bool(info.get("is_live")) or info.get("live_status") == "is_live"
 
 
+# The reason handed back to yt-dlp when the filter refuses. It goes to the log and
+# never to the group -- the group's sentence is LIVE_STREAM_REPLY, chosen from the
+# exception class. English, like every other thing written for the owner's eyes.
+LIVE_STREAM_SKIP_REASON = "live stream: refused before reading any of it"
+
+
+def _refuse_live_stream(info: dict, *, incomplete: bool = False) -> str | None:
+    """yt-dlp's `match_filter`: the only hook that answers BEFORE a byte is read.
+
+    Read off YoutubeDL.py at yt-dlp 2026.7.4: `_match_entry` is consulted from
+    `process_video_result` (line 3042) after `formats` is populated and BEFORE format
+    selection and `process_info`, and a non-None return makes it `return info_dict`
+    immediately (line 3043). So the refusal costs the metadata request that had already
+    happened and nothing else. There is no earlier hook that has seen the info dict.
+
+    Returns a reason string to refuse, None to download. TWO WAYS THIS GOES WRONG, both
+    from that same function:
+
+    * `_match_entry` calls this as `match_filter(info_dict, incomplete=...)` inside a
+      `try` that catches TypeError and retries POSITIONALLY, returning None -- download
+      it -- whenever `incomplete` is truthy (it is: `process_video_result` passes
+      `self._format_fields`, a non-empty set). So a callable that does not accept
+      `incomplete` as a keyword, or that raises TypeError internally, fails OPEN and in
+      silence. `incomplete` is accepted and deliberately unused: `is_live` comes from the
+      extractor and is present on a partial dict too.
+    * Returning yt-dlp's NO_DEFAULT sentinel makes it prompt the user on `input()`
+      (line 1636). There is nobody at the terminal on a friend's laptop, so the bot would
+      hang forever on the read -- the same unbounded failure in a new costume. This
+      returns a string or None and never that sentinel.
+
+    Not raising from here on purpose. An exception thrown inside a match_filter unwinds
+    through yt-dlp's own extraction machinery, and the one raised where the bot can see
+    it (download_into) is worth more than the two lines it saves.
+    """
+    if is_live_stream(info):
+        return LIVE_STREAM_SKIP_REASON
+    return None
+
+
 def _ydl_options(target_dir: Path) -> dict:
     options = {
         "format": MEDIA_FORMAT,
+        # The one guard that must answer before bytes move. See _refuse_live_stream:
+        # a live stream downloads forever and takes the whole bot with it, and no
+        # timeout, size or duration knob can fire on one (README.md §4.13).
+        "match_filter": _refuse_live_stream,
         "outtmpl": str(target_dir / "%(id)s.%(ext)s"),
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -935,6 +993,15 @@ def download_into(url: str, target_dir: Path) -> Media:
         except yt_dlp.utils.DownloadError as second:
             return _fallback_or_raise(url, target_dir, second, retried=True)
         log.info("the second attempt at %s worked; the first one was the network", url)
+
+    # BEFORE the `path is None` check, and that order is the whole point. A refused
+    # live stream is a successful extraction that deliberately left no file, so the
+    # generic "reported success but left no file" would fire first and misreport the
+    # one refusal that has its own name, its own ledger class and its own sentence.
+    # Asked again here rather than trusted from the filter's return value: the filter
+    # answers inside yt-dlp and its reason is not handed back to the caller.
+    if is_live_stream(info):
+        raise LiveStreamError(f"{url} is a live stream; refused before downloading any of it")
 
     path = _downloaded_path(info, target_dir)
     if path is None:
@@ -3692,6 +3759,130 @@ def _check_transport_failures_are_retried() -> None:
     print("ok  a transport failure costs one retry; an answer from the site costs none")
 
 
+# The two info dicts this feature turns on, both measured with --simulate on
+# 2026-08-10. The finished stream is the one that must still be delivered, and it is
+# the reason `was_live` sits in both dicts: a guard that reads it passes the live case
+# and fails here, which is exactly what the assertions below are for.
+LIVE_STREAM_INFO = {
+    "id": "X4VbdwhkE10", "is_live": True, "live_status": "is_live",
+    "was_live": False, "duration": None, "formats": [{"format_id": "95"}],
+}
+FINISHED_STREAM_INFO = {
+    "id": "zo5oewEQbsE", "is_live": False, "live_status": "was_live",
+    "was_live": True, "duration": 1146, "formats": [{"format_id": "136"}],
+}
+
+
+@contextmanager
+def _match_filter_stub(workspace: Path, info: dict) -> Iterator[list[str]]:
+    """yt-dlp replaced by a stand-in that HONOURS match_filter the way the real one does.
+
+    Mirrors YoutubeDL.process_video_result at yt-dlp 2026.7.4: the filter is consulted
+    (line 3042) after `formats` is populated, and a non-None answer makes it return the
+    info dict immediately (line 3043) -- no format selection, no download, no file. The
+    `incomplete` keyword is passed the way the real caller passes it, truthy, because
+    that is the argument shape a filter can silently fail open on.
+
+    Yields the list of what yt-dlp was asked to do, so the check can assert the CALL and
+    not only the outcome: "no bytes were written" is this feature's entire claim, and an
+    outcome-only assert would pass on a bot that downloaded the stream and then errored.
+    """
+    asked: list[str] = []
+
+    class _FakeYdl:
+        def __init__(self, options: dict) -> None:
+            self.options = options
+
+        def __enter__(self) -> "_FakeYdl":
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def extract_info(self, _url: str, download: bool = False) -> dict:
+            match_filter = self.options.get("match_filter")
+            reason = match_filter(info, incomplete={"id", "title"}) if match_filter else None
+            if reason is not None:
+                asked.append(f"filtered({reason})")
+                return info
+            asked.append("downloaded")
+            (workspace / f"{info['id']}.mp4").write_bytes(b"\x00" * 4096)
+            return info
+
+    class _FakeYtDlp:
+        YoutubeDL = _FakeYdl
+        utils = yt_dlp.utils
+
+    real = globals()["yt_dlp"]
+    globals()["yt_dlp"] = _FakeYtDlp
+    try:
+        yield asked
+    finally:
+        globals()["yt_dlp"] = real
+
+
+def _check_live_streams_are_refused() -> None:
+    """A live stream is refused before a byte is written; a finished one is delivered.
+
+    The defect this covers is not a wrong answer, it is an unbounded one: measured at
+    ~375 MB/h and never returning, which also means temp_workspace never cleans up and
+    -- delivery being serial -- the bot never handles another message (README.md §4.13).
+    """
+    # 1. The filter is actually installed. A guard that is not wired is not a guard,
+    #    and this is the assert that dies if `match_filter` is ever dropped from the
+    #    options dict while every other assertion here keeps passing on the callable.
+    with tempfile.TemporaryDirectory() as tmp:
+        options = _ydl_options(Path(tmp))
+    assert options.get("match_filter") is _refuse_live_stream, (
+        "the live-stream filter must be wired into the options yt-dlp actually gets"
+    )
+
+    # 2. The signature yt-dlp calls it with. `_match_entry` catches TypeError and
+    #    retries positionally, returning None -- DOWNLOAD IT -- when `incomplete` is
+    #    truthy, so a filter that cannot take this keyword fails open and in silence.
+    assert _refuse_live_stream(LIVE_STREAM_INFO, incomplete=True) is not None
+    assert _refuse_live_stream(LIVE_STREAM_INFO, incomplete=False) is not None
+    assert _refuse_live_stream(FINISHED_STREAM_INFO, incomplete=True) is None
+    # 3. Never the sentinel that makes yt-dlp block on input() with nobody there.
+    for info in (LIVE_STREAM_INFO, FINISHED_STREAM_INFO, {}, {"live_status": "is_upcoming"}):
+        assert _refuse_live_stream(info, incomplete=False) is not yt_dlp.utils.NO_DEFAULT, (
+            "NO_DEFAULT makes yt-dlp prompt on input() and the bot would hang forever"
+        )
+
+    # 4. The live stream: refused, with its own exception, and NOTHING DOWNLOADED.
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        with _match_filter_stub(workspace, LIVE_STREAM_INFO) as asked:
+            try:
+                download_into("https://www.youtube.com/watch?v=X4VbdwhkE10", workspace)
+            except LiveStreamError as exc:
+                refusal = str(exc)
+            else:
+                raise AssertionError("a live stream must not be delivered")
+        assert asked == [f"filtered({LIVE_STREAM_SKIP_REASON})"], asked
+        assert list(workspace.iterdir()) == [], "a refused live stream must leave no file"
+    # The distinct class is what the ledger and the reply both key on.
+    assert isinstance(LiveStreamError(""), ExtractionError), "_deliver must still catch it"
+    assert type(LiveStreamError("")).__name__ == "LiveStreamError", "the ledger's error class"
+    assert "X4VbdwhkE10" in refusal, refusal
+    # The generic no-file message would be a lie about a deliberate refusal, and it is
+    # what fires if the raise is ever moved after the `path is None` check.
+    assert "left no file" not in refusal, refusal
+
+    # 5. The FINISHED stream: an ordinary bounded video, downloaded and delivered. This
+    #    is the assertion a guard keyed on `was_live` dies on, and the only one that
+    #    could ever catch it -- the live case passes either way.
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        with _match_filter_stub(workspace, FINISHED_STREAM_INFO) as asked:
+            media = download_into("https://www.youtube.com/watch?v=zo5oewEQbsE", workspace)
+        assert asked == ["downloaded"], f"a finished stream is an ordinary video: {asked}"
+        assert media.path.is_file() and media.path.stat().st_size > 0, media.path
+        assert media.duration == 1146, media.duration
+
+    print("ok  a live stream is refused before a byte; a finished one is still delivered")
+
+
 def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
     """What the file on disk really is: (container, codec, width, height).
 
@@ -5297,6 +5488,7 @@ def _self_check() -> None:
     _check_failed_extraction_keeps_its_error()
     _check_only_instagram_can_be_an_image_post()
     _check_transport_failures_are_retried()
+    _check_live_streams_are_refused()
     _check_unattempted_links_are_recorded()
     _check_unsupported_media_hosts_get_an_answer()
     _check_insult_detection()

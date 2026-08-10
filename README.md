@@ -828,6 +828,43 @@ cannot fire on a live stream at all, and it would false-positive on long ordinar
 (`95`, `m3u8_native`, `avc1.4D401F` + `mp4a.40.2`, height 720, format-level `is_live=True`, no
 filesize), so the guard cannot live there — it has to answer before selection runs at all.
 
+**Where the refusal happens.** `_refuse_live_stream` is wired as yt-dlp's `match_filter`, which
+`_match_entry` consults from `process_video_result` **after `formats` is populated and before format
+selection and `process_info`** (yt-dlp 2026.7.4, line 3042); a non-`None` answer makes it
+`return info_dict` on the next line, so there is no format selection, no download and no file. The
+refusal costs the metadata request that had already happened and nothing more. There is no earlier
+hook that has seen the info dict.
+
+`download_into` then asks `is_live_stream(info)` again and raises `LiveStreamError` — **before** its
+`path is None` check, which is load-bearing: a refused stream is a successful extraction that
+deliberately left no file, so the generic *"yt-dlp reported success but left no file"* would fire
+first and misreport the one refusal that has its own name, its own ledger class and its own sentence.
+It is asked again rather than carried out of the filter because the filter answers inside yt-dlp and
+its reason never reaches the caller.
+
+`LiveStreamError` subclasses `ExtractionError` so nothing on the delivery path needs to learn about
+it: `_deliver`'s `except Exception` already catches it and `record_rejection` already writes
+`type(exc).__name__`, so the ledger gets the new class for free. Only the sentence is new (§5.2).
+
+Two traps in that wiring, both read off `_match_entry`:
+
+- It calls `match_filter(info_dict, incomplete=...)` inside a `try` that catches `TypeError` and
+  **retries positionally, returning `None` — download it — whenever `incomplete` is truthy**, and
+  `process_video_result` passes `self._format_fields`, a non-empty set. A callable that does not
+  accept `incomplete` as a keyword, or that raises `TypeError` internally, therefore fails **open**
+  and in silence. That is why the check calls it both ways round explicitly.
+- Returning yt-dlp's `NO_DEFAULT` sentinel makes it prompt on `input()` (line 1636). There is nobody
+  at the terminal on a friend's laptop, so the bot would hang forever on the read — the same
+  unbounded failure in a new costume. The filter returns a reason string or `None`, never that
+  sentinel, and the check asserts it for four different info dicts.
+
+**The check is driven by a fake yt-dlp that honours `match_filter` the way the real one does**, and it
+asserts the *call* — `filtered(...)` versus `downloaded` — not only the outcome, because an
+outcome-only assert passes on a bot that downloads the whole stream and then raises. The live case
+and the finished case are both driven; the finished one is the assertion a guard keyed on `was_live`
+dies on, and the only one that could ever catch it. **No seventh real download was added** — a live
+stream cannot be a self-check entry, since the thing being asserted is that nothing is downloaded.
+
 ---
 
 ## 5. Operations — what actually breaks
