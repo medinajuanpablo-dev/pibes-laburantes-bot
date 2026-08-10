@@ -2866,6 +2866,23 @@ def _check_pure_helpers() -> None:
     # entity anywhere: this path is not hypothetical the way the entity path still is.
     assert find_urls("mira https://exam＃ple.com/x") == ["https://exam＃ple.com/x"], \
         "URL_PATTERN allows any non-space character, so it emits this one"
+
+    # THE CATCH STAYS NARROW, and this is what makes that a rule with teeth rather
+    # than a sentence in a docstring. A non-string reaching here is a programming
+    # error, not a URL that failed to parse, and answering it "no" would hide a bug
+    # the same way a bare except would. Widened to `except Exception`, the guard turns
+    # this into False and nothing else in the self-check notices.
+    #
+    # Which non-ValueError urlparse raises for an int is CPython's business and is not
+    # pinned here -- only that it is not swallowed.
+    try:
+        is_supported(123)  # type: ignore[arg-type]
+    except ValueError:
+        raise AssertionError("a non-string must not be reported as an unparseable URL")
+    except Exception:
+        pass
+    else:
+        raise AssertionError("the guard is catching more than ValueError")
     print("ok  an unparseable URL is answered, not raised")
 
     # media_kind and the reply-method mapping.
