@@ -330,3 +330,23 @@ lockout — 203+ polls, zero ERROR lines), and everything of mine was already co
 one thing I could still write was `/private/tmp`, so the agent's measurements went into a handoff there
 before this section existed. **Standing note for any future run: `/private/tmp` stays writable when the
 project does not — write the handoff there first, then copy it in.**
+
+### Baseline recorded BEFORE order 14 slice 0, so the live test is a real before/after
+| | Pre-fix, measured 17:39 on the live process |
+|---|---|
+| lines containing the token | **350** |
+| the bot's own lines that **must survive** | `polling; privacy mode must be OFF…`, `only one instance can poll this token…`, `Application started`, and two real field lines: `message 69930: no URL recognised, nothing to do` / `message 69931: …` (16:41) |
+| the right instrument | `grep -vE "HTTP Request:"` — everything that is not httpx. **My first grep looked for the literal `the-bot` and returned 0**, which would have read as "the bot logs nothing"; the format is `%(asctime)s %(levelname)s %(message)s` with no logger name. Caught it on the next line. |
+
+**Post-merge assertion:** token occurrences → **0**, and all five of those own-lines still present.
+
+### Field state during the lockout
+No traffic. 345 polls, **zero** ERROR/WARNING/Traceback lines, last poll 17:38:54, ledgers unchanged at
+6 and 4 lines. **Nothing was missed while I was locked out** — the group was quiet, and the bot never
+noticed the lockout at all.
+
+### One hygiene gap found, deliberately NOT fixed by me
+`.claude/` is **untracked and not in `.gitignore`** (`.env` and `.venv/` are). It holds the agent
+worktrees, so a blind `git add -A` would commit them. `.gitignore` is config, which the role counts as
+code, so it is an order, not mine — and it is small enough to ride along with the next one rather than
+earn its own.
