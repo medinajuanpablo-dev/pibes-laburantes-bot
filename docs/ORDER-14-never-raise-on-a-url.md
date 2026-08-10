@@ -10,8 +10,14 @@
 
 Read `AGENTS.md`, then `README.md` §4.6 (how a message becomes a list of links) and §5.
 
-Branch from `main` **after order 13 merges** — order 13 also changes `_handle_links`, so this order is
-NOT parallel-safe with it. If `main`'s tip does not contain order 13's link cap, stop and say so.
+**Branch point, corrected 17:36:** branch from current `main`. Order 13 **shipped nothing** — its agent
+was killed by an OS-level permission lockout with two additive, un-gate-verified constants left
+uncommitted in its own worktree, which is preserved and is not yours. So there is no in-flight track
+and `main` is the branch point. The earlier "branch after order 13 merges" line was written when that
+merge was expected.
+
+**Scope for this dispatch: SLICE 0 ONLY.** Checkpoint and report after it. Slices 1-3 stay unbuilt; the
+CEO owns scope and there is a time box closing at 18:01.
 
 ### The defect, measured
 
