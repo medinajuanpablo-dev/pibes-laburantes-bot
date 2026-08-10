@@ -69,6 +69,7 @@ Criteria 1-3 and 5-7 were closed during the GOAL session (`run-history/01-goal-s
 | Idea, deferred | Honour `img_index` on a carousel | Ambiguous whether Instagram means it as a pointer. Promote if someone reports getting 10 photos when they wanted 1. |
 | Sub-task | Mixed photo/video carousels | Refused, never measured -- the only public example cited upstream is dead. Promote when a live one appears. |
 | Sub-task | Windows launcher unverified | No Windows machine exists in this run. Promote when a friend runs it. |
+| Idea, **offered and awaiting a call** | Keep Telegram's own backlog instead of dropping it, filtered by message age (~15-20 min), so a link posted while nobody hosted still arrives | The owner cancelled the in-memory queue because it dies with the process -- correctly. This is the version that survives that, and it needs no queue and no dependency. It re-opens a measured decision (`drop_pending_updates=True`, 7 updates queued in one real gap), so it needs his call, not mine. |
 | Sub-task | Ledger fragments across rotating hosts | Accepted at this volume; `cat` is the merge. Promote if hosts multiply. |
 
 ### Standing re-read triggers
