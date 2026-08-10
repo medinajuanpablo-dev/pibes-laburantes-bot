@@ -142,10 +142,10 @@ Three things follow from the design and are not obvious:
   group is left with no bot at all — measured on 2026-08-09, §4.9.
 - **Distribution is `git clone`, never a downloaded zip**, and that is also the update channel: each
   launcher runs `git pull --ff-only` on startup, so the owner pushes and every friend gets the
-  change on their next double-click. It also side-steps Gatekeeper entirely — a file written by git
-  carries no `com.apple.quarantine` attribute, a downloaded one does. Verified 2026-08-07: a
-  quarantined `.command` is refused by LaunchServices with `userCanceledErr` and never runs, while
-  the same file cloned runs on a double-click.
+  change on their next double-click. It also side-steps Gatekeeper entirely, and it is what makes
+  the launcher double-clickable at all: git restores the exec bit and writes no
+  `com.apple.quarantine`, and a downloaded file has the first missing and the second present. A
+  `.command` needs both to run — measured, §2.2.
 - **Whatever was posted while nobody was hosting is dropped**, not replayed — `run_polling` is
   called with `drop_pending_updates=True`. Telegram holds updates for ~24 h and a handover always
   follows a gap, so the default would dump the whole gap into the group at once. Measured with
@@ -160,20 +160,41 @@ still the way the owner runs it, and the launcher is a convenience wrapped aroun
 `/instalar` replies with the one line a friend pastes to become a host. It works in the group and
 in a DM, and Telegram lists it in the command menu, so nobody has to be told it exists.
 
-**It is a message, not a file, and that is forced rather than chosen.** Two facts already measured
-here rule out sending the launcher as an attachment:
+**It is a message, not a file, and that is forced rather than chosen.** Three facts rule it out —
+not only sending `run-bot.command` itself, but sending any small bootstrap that would clone the repo
+and hand off to it. Two of them are about what a downloaded file *is*, and were measured on
+2026-08-09, macOS 15.1.1 (24B91), by opening one script four times and checking whether its body
+actually ran:
 
-- **A launcher on its own is inert.** `run-bot.command`'s first act is `git pull` in a directory
-  with no `.git`, and its last is `exec .venv/bin/python bot.py` with no `bot.py` beside it. It also
-  needs `requirements.txt`.
-- **A downloaded file is quarantined; a git-written one is not** (§2.1). A quarantined `.command` is
-  refused by LaunchServices and never runs.
+| file mode | `com.apple.quarantine` | double-click runs it |
+|---|---|---|
+| 644 | absent | **no** — Terminal opens, the script never executes |
+| 755 | absent | yes |
+| 755 | present | **no** |
+| 755 | removed again | yes (control) |
 
-Shipping the whole repository as an archive fails for a third reason: with no `.git` it can never
+**A file that arrived over Telegram is in the first row and the third one at once.** Telegram
+Desktop 7.0.9 (`com.tdesktop.Telegram`) declares `LSFileQuarantineEnabled` with no exclusions, and
+the files already saved out of it on the owner's Mac are mode `644` carrying `com.apple.quarantine`
+with agent `Telegram`. So an attached `.command` is refused twice over, and **right-click → Open is
+not the fix**: it answers the quarantine half and cannot add an exec bit. The only thing that adds
+one is `chmod +x` in a Terminal — which is the step that sending a file exists to avoid, so the
+attachment is strictly worse than the pasted line, not better.
+
+The third fact is the older one: **a launcher on its own is inert.** `run-bot.command`'s first act is
+`git pull` in a directory with no `.git`, and its last is `exec .venv/bin/python bot.py` with no
+`bot.py` beside it. It also needs `requirements.txt`. This objection, on its own, has a cheap answer
+— a bootstrap that clones and then hands off would still be a file you double-click, and would still
+land the friend in a real clone — so it is not what closes the question. The two measurements above
+are.
+
+Shipping the whole repository as an archive fails for a fourth reason: with no `.git` it can never
 `git pull`, so it is a snapshot that rots — the opposite of what this is for. The one command that
-creates a real clone travels as text, so nothing is quarantined, and it lands the friend in a
-working copy whose launcher pulls on every startup. **That is what keeps every friend current: the
-owner pushes, and the next double-click has it.**
+creates a real clone travels as text, so nothing is quarantined and nothing is missing a mode bit:
+git restores both, which is exactly why a cloned `run-bot.command` runs on a double-click when the
+same bytes downloaded do not. It lands the friend in a working copy whose launcher pulls on every
+startup. **That is what keeps every friend current: the owner pushes, and the next double-click has
+it.**
 
 `mac` and `windows` are the arguments, and **bare is the common case, not the fallback** — a tap on
 the command menu sends `/instalar` with nothing after it, and this audience taps. Bare answers with

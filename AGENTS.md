@@ -108,12 +108,19 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **`drop_pending_updates=True` is a decision, not a default.** Telegram holds updates ~24 h and
   every handover follows a gap in which nobody hosted, so replaying the queue dumps the whole gap
   into the group at once. The accepted cost is that a link posted while the bot was off is lost.
-- **A file written by `git` carries no `com.apple.quarantine`; a downloaded one does.** That is the
-  entire reason distribution is `git clone` rather than a zip: a quarantined `.command` is refused
-  by LaunchServices and never runs. It is also why the launcher can update itself. It is also why
-  `/instalar` hands out a **command** and never the launcher as an attachment (`README.md` §2.2) —
-  and a launcher on its own is inert anyway: its first act is `git pull` in a directory with no
-  `.git`.
+- **A downloaded `.command` cannot be double-clicked, and it takes two independent things to make
+  one that can.** It needs the exec bit **and** no `com.apple.quarantine`; a download has neither.
+  All four combinations were measured on 2026-08-09 (macOS 15.1.1), along with what Telegram
+  Desktop actually writes — mode `644`, quarantined — so an attachment fails both tests at once
+  (`README.md` §2.2 has the table). `git clone` supplies both, because git stores the mode
+  (`run-bot.command` is `100755` in the index) and writes no quarantine. That is the entire reason
+  distribution is a clone rather than a zip, it is why the launcher can update itself, and it is why
+  `/instalar` hands out a **command** and never a file as an attachment. **Right-click → Open does
+  not rescue an attachment**: it speaks to the quarantine half and cannot add an exec bit, and the
+  `chmod +x` that would costs the friend exactly the Terminal that sending a file was meant to save.
+  A launcher on its own is also inert — its first act is `git pull` in a directory with no `.git` —
+  but that objection alone would not settle it, because a bootstrap that clones and hands off is
+  still a file you double-click. The two measurements are what settle it.
 - **Exactly one reply in this file sets a `parse_mode`, and `_reply_text`'s default must stay
   `None`.** `/instalar` needs HTML for its code block, which is what makes Telegram offer
   tap-to-copy. Every other reply — the apology, the oversize line with a raw URL in it, the insult
