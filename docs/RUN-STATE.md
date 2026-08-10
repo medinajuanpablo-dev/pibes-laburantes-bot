@@ -216,3 +216,23 @@ badly — one message costing unbounded work.** Everything shipped since the bat
 | 9 | Ordered slice 1 to be **allowed to build nothing** if the risk is not real | I did not reproduce it — I refused to start an unbounded download on the machine hosting production. A guard against a fiction is worse than no guard. | Yes |
 | 10 | Did **not** order a pre-flight size check | The oversize path already behaves correctly, just wastefully (downloads 73 MB then refuses). And a `filesize_approx` filter may be vacuous on Instagram for the same reason `height` is — unmeasured. Queued with the measurement it needs. | Yes |
 | 11 | Followed the owner's hardening direction rather than re-running the portfolio argument | He named the direction explicitly this round. The portfolio is not skewed: the last landings were capability (launchers, `/instalar`, named failures, unsupported hosts). | Yes |
+
+### AUTO round 11 — hunt log (predictions written before each measurement)
+| What I ran | Predicted | Observed | Where it went |
+|---|---|---|---|
+| `pgrep` + orphaned temp dirs + ledger size | A crash leaks a part-downloaded video, so repeated crashes fill a friend's disk | **Wrong, in the direction that suited me.** One orphan exists, from my own kill at 11:26, and it is **0 B** — the dir is created before the download and cleaned in `finally`, so a hard kill leaves an empty directory entry, not media. Ledgers are 6 and 4 lines. | Nothing. Not a defect. |
+| `is_supported` against 7 hostile hosts (fullwidth stop, dotless i, broken punycode, 300-char host, zero-width space, malformed IPv6), with an ordinary-URL control arm | The queued row says it raises on "exotic NFKC hosts" | **The queued row was wrong about the trigger.** Every unicode candidate returned `False` cleanly. The only raiser is `https://[::1/x` → `ValueError: Invalid IPv6 URL`, which is `urlsplit`, nothing to do with NFKC. | Queue row corrected; see below |
+| Whether a plausible human message can even produce that URL — `message_urls` on 4 realistic sentences | It can, so the defect is reachable | **Not through the regex.** All four returned `[]` or only the good link. But reading `message_urls` showed the second source: `entity_urls` appends whatever Telegram marks as a URL **with no validation** — only junk-stripping and a scheme prefix. | Narrowed the defect to the entity path |
+| The full scenario: a fake `Message` with two URL entities, one good reel and one malformed-IPv6, run through exactly what `_handle_links` does — **control arm: a well-formed entity alone must sail through** | If the entity path is unvalidated, the good reel dies with the bad URL | **CONFIRMED, control arm passed.** `message_urls` returns both, `is_supported` raises, and `_handle_links` has no `ValueError` guard. **The good reel in that message is never delivered and the group gets silence.** | **Order 14, next front** |
+| Insult matcher vs 21 phrases: 7 true positives + 14 innocent rioplatense ones, including the `bro` case that shipped and the `botas`/`bote`/`boto` family | The long-word family false-positives: raw difflib scores them 0.75, 0.857, 0.857 — all above the 0.66 threshold | **Wrong. 21/21 correct.** A guard I had not read stops them: `if len(token) > len(word): continue` — a typo of "bot" is never *longer* than "bot". Already documented in `AGENTS.md` and `README.md` §4.12 **with the same scores I re-derived.** | Nothing. My candidate was already known and already handled. |
+
+**Three of five sweeps refuted a hypothesis of mine, two of them by finding the project already
+right.** The one that survived is the entity path, and it survived a control arm.
+
+### Order 14 — mapped, ready to dispatch (blocked only on `bot.py` territory)
+A URL that reaches `is_supported` from `entity_urls` can raise, and the raise costs the whole message.
+The fix is a guard, not a parser: **`is_supported` must never raise** — an unparseable URL is simply not
+supported. Value does not depend on measuring whether Telegram's own parser emits this shape (it
+cannot be measured without a human paste, per the exercise contract), because the guard covers *any*
+unparseable URL from *any* source. Also worth a must-stay-red entry: the list has several `entity_urls`
+rows and **none** for a malformed URL from an entity crashing the handler.
