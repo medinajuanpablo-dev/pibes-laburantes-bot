@@ -469,3 +469,27 @@ catches the silent version. A second check asserts `LIVE_STREAM_REPLY` is **not*
 2. **I rebased its branch while it was still working in that worktree.** That rewrites commits under a
    live agent's feet. It survived — it committed cleanly on top of the rebased branch — but that is luck,
    not process. **Rebase after the report, never during.**
+
+### Criterion 1 widened from n=1 to n=6, and an instrument error of mine on the way
+Found six independent live URLs off a channel's streams tab (metadata only) and drove the **real**
+`download_into` against every one:
+
+```
+LTiqKDrjqr4 refused 0 bytes 1.5s   GSfT7H87zq4 refused 0 bytes 1.6s
+VAlMDl00mYY refused 0 bytes 1.1s   qGohtGC5Rtk refused 0 bytes 1.2s
+X4VbdwhkE10 refused 0 bytes 1.5s   CwPCy1GLS38 refused 0 bytes 1.5s
+CONTROL jNQXAC9IVRw -> delivered jNQXAC9IVRw.mp4, 629172 bytes
+```
+
+**6/6 refused, zero bytes each, and the control arm still delivers** — so the sweep is not vacuous and
+criterion 1 no longer rests on a single URL.
+
+**My instrument error, caught against myself:** my first two attempts at this used `timeout 40 …` and
+returned nothing, which I could have written down as *"no premieres found"*. They never ran — **`timeout`
+does not exist on this Mac, and it is already in the exercise contract's known traps** — and `2>/dev/null`
+hid the `command not found`. I used the trap my own foundation warned me about, and the silent-hiding redirect
+turned it into a plausible result. Rerun without it, the probe returned six rows immediately.
+
+**Still unmeasured, and honestly so:** `is_upcoming` (a premiere). I looked and the channels I checked had
+none right now, so the agent's `ponytail:` stands as written — both values fall through rather than being
+guessed at. Not a gap in the landing; a gap in the world's supply of premieres at 20:00 on a Monday.
