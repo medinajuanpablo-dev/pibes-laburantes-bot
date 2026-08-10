@@ -460,6 +460,18 @@ fail a 1.2 MB upload is frequently bad enough to fail a text reply, so `_apologi
 protected attempt with its own timeouts that logs and never re-raises. **It is the last line of
 defence and it is the one place in this file where swallowing an exception is correct.**
 
+**One failing link does not cost the others in the same message, and this was measured rather than
+assumed.** The delivery loop at the end of `_handle_links()` is a plain `for url in supported:` with
+no `try` of its own, so the isolation has to come from `_deliver()` — and it does: its entire body
+sits inside one `try`, and the `except Exception` logs, records the failure in the ledger under its
+own class, and apologises. Nothing can escape it, because both calls it makes on the way out are
+themselves non-raising by contract — `record_rejection()` swallows and logs, and so does
+`_apologise()`. Driven with three supported links whose middle download raises: the other two
+delivered, the failing one produced exactly one ledger record and exactly one apology, and the loop
+did not stop. **Nothing was added for this** — the exposure the `for` loop looks like it has is
+already closed one level down, and a second `try` around the loop would only add a place for a
+failure to get quieter.
+
 ### 4.7 Anonymous extraction
 
 All three sites extract **without cookies**. `PLAN.md` claimed Instagram needed them and Facebook
