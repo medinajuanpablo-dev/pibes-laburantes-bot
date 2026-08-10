@@ -789,6 +789,20 @@ them.
 **The application logic will not rot. The extractors will.** YouTube, Instagram and Facebook change
 their pages without warning, and that is this project's real failure mode.
 
+**"¿Te puedo mandar la ventana?" — yes, since 2026-08-10.** Before that date the answer was no, and
+nobody had noticed: python-telegram-bot's HTTP client (`httpx`) logs every request at INFO with the
+full URL, and every Telegram API URL carries the token in its path
+(`api.telegram.org/bot<TOKEN>/getUpdates`). Measured on the live process: **374 of the 379 lines it
+logged in 64 minutes were that line** — about six a minute, and the launcher does not redirect
+stdout, so they go to the Terminal window a friend is looking at. A screenshot of it was full
+control of the bot. `configure_logging()` now runs that one logger above INFO. Nothing else changed:
+the deliveries, the bounced links with their URLs, the conflict lines (item 6) and the retry line
+all still print, which is the point — that window is the only diagnostic anybody has here. The
+self-check asserts **both** halves, no request URL *and* the bot's own INFO lines still arriving,
+because a fix that had silenced the whole process would pass the first one alone. A redaction filter
+over the log was considered and refused: it would have to be right about every URL shape httpx will
+ever log, and it is silent when it is wrong.
+
 1. **Videos stop downloading → update yt-dlp first.** `.venv/bin/pip install -U yt-dlp`. This fixes
    the large majority of breakages and nothing else is worth trying before it.
 2. **The bot ignores a link → read the log.** `on_message` says which of the two happened:

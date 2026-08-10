@@ -31,6 +31,11 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlparse
 
+# python-telegram-bot's HTTP client. The bot never calls it -- PTB owns every request
+# -- but the self-check drives it to prove the token cannot reach the log, and having
+# the import here means a future pin that drops httpx altogether fails at startup, in
+# front of whoever bumped it, instead of quietly putting the token back in the window.
+import httpx
 import telegram
 import yt_dlp
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -44,6 +49,15 @@ log = logging.getLogger("the-bot")
 
 TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
 COOKIES_ENV_VAR = "YTDLP_COOKIES"
+
+# python-telegram-bot's HTTP client, and the one logger that may not run at INFO: it
+# logs every request with the full URL, and every Telegram API URL carries the token
+# in its path. Identified on the installed httpx 0.28.1 -- `logging.getLogger("httpx")`
+# in `_client.py`, logging `request.url` from `_send_single_request` -- and the name is
+# re-verified at runtime by the self-check rather than trusted from that reading, so a
+# pin bump that moves the request log cannot pass quietly. Child loggers need no entry
+# here: a level on the parent is what an unset child inherits.
+REQUEST_URL_LOGGER = "httpx"
 
 # Telegram's bot-upload ceiling, verified against
 # https://core.telegram.org/bots/api#sending-files on 2026-08-07:
@@ -2411,10 +2425,45 @@ def build_application(token: str) -> Application:
     return app
 
 
+def configure_logging() -> None:
+    """The levels the bot runs at. Split out of main() so the self-check can assert them.
+
+    INFO for the bot itself, because the launcher's window is the only diagnostic a
+    friend has (README.md §5): the deliveries, the bounced links, the conflict lines
+    and the retry line all live there and none of them may go quiet.
+
+    WARNING for REQUEST_URL_LOGGER, because at INFO it prints the bot's own token.
+    Measured on the live process on 2026-08-10: of 379 lines logged in 64 minutes of
+    production, **374 carried the token** -- about six a minute, forever. The launcher
+    does not redirect stdout, so on a friend's machine those go to a visible Terminal
+    window, and that window is exactly what he pastes when he says "mirá, no anda".
+    The paste would be full control of the bot: read the group and post as the bot.
+
+    Silencing the one logger instead of filtering the records is deliberate. A
+    redaction filter has to be right about every URL shape httpx will ever log and is
+    silent when it is wrong; a level that is too high fails closed.
+
+    The root level is set explicitly rather than through basicConfig's `level=`:
+    basicConfig does nothing at all once the root logger has a handler, which is the
+    state the self-check is in when it calls this, and a check that cannot observe
+    this function is a check of nothing.
+    """
+    # ponytail: this silences the logger measured to leak, not every conceivable leak.
+    # A rename inside the httpx namespace is covered, and so is anything that logs a
+    # Telegram URL through that logger; a future python-telegram-bot on a different
+    # HTTP client is not, and the self-check drives httpx directly so it would keep
+    # passing. Upgrade path the day PTB changes client: assert the token's absence
+    # around a real telegram.request object, which needs a transport seam PTB does not
+    # expose today. Nothing here redacts: whatever the bot logs on purpose still prints.
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger(REQUEST_URL_LOGGER).setLevel(logging.WARNING)
+
+
 def main() -> None:
     global _take_over_until
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     if not ffmpeg_path():
         log.warning("ffmpeg is not on PATH; merged-quality downloads will fail")
     if take_over_requested(sys.argv[1:]):
@@ -3858,6 +3907,62 @@ def _capture_log(level: int) -> Iterator[list[str]]:
         log.propagate = previous_propagate
 
 
+def _check_the_log_never_shows_the_token() -> None:
+    """The window the bot prints must never contain the token -- and must still contain
+    everything else.
+
+    Both halves are the check. Asserting only the first passes if the fix silenced the
+    whole process, which would cost a friend the one diagnostic he has and hide the
+    conflict lines that explain a bot that stopped.
+
+    Driven through a fake transport: a real httpx request object, the real logging call
+    inside `Client.send`, and no network, no token and no second poller anywhere near
+    it. Driving httpx rather than asserting a level number is what pins REQUEST_URL_LOGGER
+    to whatever actually prints the URL on the installed version; a level assertion would
+    still pass if the request log moved to a name nothing here silences.
+    """
+    fake_token = "123456789:AAFakeTokenNeverIssuedByTelegramOnlyForThisCheck"
+    own_line = "polling; the line the window has to keep"
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = _Collect(logging.INFO)
+    root, urls = logging.getLogger(), logging.getLogger(REQUEST_URL_LOGGER)
+    previous_root, previous_urls = root.level, urls.level
+    root.addHandler(handler)
+    try:
+        configure_logging()
+        with httpx.Client(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200))
+        ) as client:
+            client.get(f"https://api.telegram.org/bot{fake_token}/getMe")
+        log.info(own_line)
+    finally:
+        # The rest of the self-check runs at WARNING on purpose (see _capture_log), so
+        # both levels this touched go back exactly as they were.
+        root.removeHandler(handler)
+        root.setLevel(previous_root)
+        urls.setLevel(previous_urls)
+
+    leaked = [line for line in records if fake_token in line]
+    assert not leaked, (
+        f"a request URL reached the log with the token in it: {leaked}. Either "
+        f"{REQUEST_URL_LOGGER} is no longer the logger that prints request URLs, or "
+        f"configure_logging stopped raising its level"
+    )
+    assert own_line in records, (
+        "the bot's own INFO lines no longer reach the log: the fix silenced the window "
+        "a friend reads instead of the one logger that prints the token"
+    )
+    print(
+        f"ok  the log keeps the bot's own lines and never a request URL "
+        f"({REQUEST_URL_LOGGER} raised above INFO, {len(records)} line(s) still got through)"
+    )
+
+
 def _check_message_logging() -> None:
     """A message that produces no video must say why in the log."""
 
@@ -5114,6 +5219,7 @@ def _check_install_instructions() -> None:
 def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
+    _check_the_log_never_shows_the_token()
     _check_send_timeouts()
     _check_message_logging()
     _check_rejected_ledger()

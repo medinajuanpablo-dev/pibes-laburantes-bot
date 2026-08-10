@@ -348,7 +348,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   checks pin the redirection that writes it, the `if exist` that reads it, and the `echo ` lines a
   friend actually sees · **a line added to the reply, or one removed** —
   the budget is three lines per platform and five bare, and it is asserted exactly, because the defect
-  it replaced was a 22-line wall nobody read to the end of.
+  it replaced was a 22-line wall nobody read to the end of. ·
+  `configure_logging` losing the level it puts on `REQUEST_URL_LOGGER`, setting it to INFO, or naming a
+  logger that is not the one httpx prints request URLs from — **and the mirror mutation, the level
+  widened onto the root or onto `the-bot`**, which stops the token *and* every line a friend has to
+  read. Both halves are one check: silencing everything passes the first assert on its own.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.
