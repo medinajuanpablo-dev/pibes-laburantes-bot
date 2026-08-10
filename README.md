@@ -156,11 +156,15 @@ Three things follow from the design and are not obvious:
   still the entire release process for both kinds of copy**. Which copy has which updater, and the
   two rules that stop them contradicting each other, are in `docs/updating.md`. Untested on real
   Windows, like the launcher beside it.
-- **Whatever was posted while nobody was hosting is dropped**, not replayed — `run_polling` is
-  called with `drop_pending_updates=True`. Telegram holds updates for ~24 h and a handover always
-  follows a gap, so the default would dump the whole gap into the group at once. Measured with
-  nobody running: 7 updates queued, 2 of them reels. The cost is that a link posted while the bot
-  was off never arrives.
+- **Whatever was posted while nobody was hosting still arrives** — `run_polling` is called with
+  `drop_pending_updates=False`, so **a host who starts after a gap sees that gap's links delivered
+  at startup**, oldest first and one at a time. Telegram only holds updates for ~24 h, so a gap
+  longer than that still loses the older end of it. Measured with nobody running: 7 updates queued,
+  2 of them reels — that is the size of backlog a handover recovers, not a flood. Chosen 2026-08-10
+  over the previous behaviour, which dropped the queue and told nobody. Two consequences worth
+  knowing: the arrivals are not new messages, so they can be minutes or hours old; and a baton pass
+  (above) may repeat the newest link, because the yielding instance cannot acknowledge its last
+  batch through the 409 that made it yield.
 
 The owner's workflow is `docs/updating.md`. Nothing else here changes: `python bot.py` above is
 still the way the owner runs it, and the launcher is a convenience wrapped around exactly that.

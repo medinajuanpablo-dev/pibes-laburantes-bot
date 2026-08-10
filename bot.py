@@ -2664,17 +2664,31 @@ def main() -> None:
     app = build_application(read_token())
     log.info("polling; privacy mode must be OFF for the bot to see plain links (see README.md)")
     log.info("only one instance can poll this token at a time (see README.md: the baton pass)")
-    # ponytail: whatever was posted while nobody was hosting is lost. Telegram holds
-    # updates for about 24 hours and run_polling() replays them all by default, so
-    # the first person to open the launcher would dump everything posted in the gap
-    # into the group in one burst -- with a rotating host that is the normal case,
-    # not an edge case. Measured with nobody running: 7 updates queued, 2 of them
-    # reels. At ~20 links a week the flood is clearly worse than the loss, and
-    # anybody can paste the link again. The ceiling is exactly that: a link posted
-    # while the bot was off never arrives. Upgrade path if it ever bites, and it
-    # needs no new dependency: keep the backlog but deliver only the updates whose
-    # message date is within a few minutes of startup, dropping the rest.
-    app.run_polling(drop_pending_updates=True)
+    # Deliberate: whatever was posted while nobody was hosting is DELIVERED, not
+    # dropped. Telegram holds updates for about 24 hours, and with a rotating host a
+    # gap in which nobody polls is the normal state rather than an edge case -- so
+    # dropping the queue lost every link posted in a gap and told nobody, which is the
+    # same silence two other orders were spent removing. The owner chose recovery over
+    # silence on 2026-08-10. Written as an explicit False, not by omitting the kwarg:
+    # the value is the decision, and the self-check pins it so a later cleanup cannot
+    # quietly flip it back.
+    #
+    # The cost is real, and measured to be small: a host starting after a long gap may
+    # see several older links arrive at once. Measured with nobody running, the whole
+    # queue was 7 updates, 2 of them reels -- and this Application is built with PTB's
+    # default of one concurrent update, so a backlog drains oldest-first, one link at a
+    # time, instead of as a thundering herd. At ~20 links a week that is a handful of
+    # last night's links. No age filter: it would reintroduce exactly the loss above to
+    # avoid a burst that was never big enough to matter.
+    #
+    # One interaction with the baton pass (README.md §2.1), mechanical but NOT measured
+    # here -- this file's checks have no live surface: python-telegram-bot tells Telegram
+    # its offset only on the NEXT getUpdates, and the one extra getUpdates it makes while
+    # shutting down meets the same 409 that made this instance yield. So the batch the
+    # yielding incumbent fetched last can still be pending, and the instance taking the
+    # baton re-delivers it: a handover may repeat the newest link or two. Dropping the
+    # queue used to hide that. De-duplicating updates is not built and was not asked for.
+    app.run_polling(drop_pending_updates=False)
 
 
 # --------------------------------------------------------------------------------
@@ -5301,12 +5315,16 @@ def _check_conflict_handling() -> None:
     print("ok  one line per episode, and only the side that was not taking over stops")
 
 
-def _check_startup_drops_the_backlog() -> None:
-    """Starting must not replay everything posted while nobody was hosting.
+def _check_startup_keeps_the_backlog() -> None:
+    """Starting must replay what was posted while nobody was hosting.
 
     main() is reached with a stand-in Application, so the kwarg is asserted where it
     is actually passed rather than as a constant that agrees with itself. The token
     is a shaped fake and no request is made: build_application is replaced first.
+
+    Asserted as `is False`, not as falsy and not as absent: omitting the kwarg would
+    behave the same way today, so only the explicit value distinguishes the decision
+    from an accident. A cleanup that deletes it fails here too, which is the point.
     """
 
     class PollRecordingApplication:
@@ -5330,8 +5348,8 @@ def _check_startup_drops_the_backlog() -> None:
         else:
             os.environ[TOKEN_ENV_VAR] = previous
 
-    assert application.kwargs.get("drop_pending_updates") is True, application.kwargs
-    print("ok  startup drops the backlog instead of flooding the group")
+    assert application.kwargs.get("drop_pending_updates") is False, application.kwargs
+    print("ok  startup keeps the backlog, so a link posted in a gap still arrives")
 
 
 # Two fakes, both shaped like a real Telegram token, so a leak of either is caught by
@@ -5724,7 +5742,7 @@ def _self_check() -> None:
     _check_failure_path()
     _check_take_over_intent()
     _check_conflict_handling()
-    _check_startup_drops_the_backlog()
+    _check_startup_keeps_the_backlog()
     _check_install_instructions()
     _check_extraction()
     print("\nself-check passed")
