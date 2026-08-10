@@ -386,3 +386,41 @@ show up there."* **False twice over:** nothing in `--self-check` reaches the Tel
 `build_application` there uses a shaped fake token and is replaced before any poll), and a `setLevel`
 cannot break an HTTP client — it only decides whether a record is emitted. The real confirmation is inside
 the agent's own check: the request completes with the new config in force.
+
+---
+
+## GOAL — "los 3 que valen la pena" · locked 2026-08-10 18:0x
+- **Mode:** **GOAL**, no `ask`. Ceiling *feature*. Ends when the criteria below are **verified**.
+  Previously AUTO with a 1 h box, closed 17:53 with the ⏱ banner.
+- **Docs loaded:** modes ✓ · continuation ✓ · run-loop ✓ · dispatch ✓ · audit ✓ — all read from disk
+  this session, no compaction since.
+- **Serial by construction.** Everything here lands in `bot.py`, so it is **one track at a time**
+  (`dispatch.md`: a project whose work serializes through one module runs ONE track; a second only buys
+  collisions). Order: 1 → 2 → 3.
+
+### Kickoff answers, and what they changed
+| Question | Answer | What it locked |
+|---|---|---|
+| How far back to recover | **Everything Telegram keeps (~24 h)** | **No age filter.** `drop_pending_updates=False` and nothing else — one line instead of a filter. The `ponytail:` at `bot.py:2479` proposed "a few minutes"; the owner went generous, and **the evidence backs him**: the flood that justified dropping everything was measured at **7 updates**, 2 of them reels. |
+| Announce start/stop | **Neither** | Item 3 is link recovery only. No new chat noise. Kills the "bot caído" announcement I had offered twice — correctly: an unclean shutdown never sends it, so the silence stays ambiguous anyway. |
+| Who hosts for the live layer | **Owner brings his down, I host** | Item 3 gets a **real** live layer: I can force a gap, paste into it, and verify the recovery. Until his poller stops I cannot touch `getUpdates` at all. |
+
+### Acceptance criteria — the terminal condition
+1. **A live stream never starts downloading.** A pasted live link gets its own Spanish line and **zero
+   bytes** of media hit disk. Proven by the bounded re-run of `youtube.com/watch?v=X4VbdwhkE10` with the
+   guard in place — the measurement that is currently *read from yt-dlp's source, never run*.
+2. **A finished stream still delivers.** `watch?v=zo5oewEQbsE` (`was_live: True`, duration 1146) is an
+   ordinary video and must NOT be refused. This is the regression the guard can silently cause.
+3. **`is_supported` never raises.** A malformed URL from a Telegram entity returns `False`, and a good
+   reel in the same message is still delivered. Control arm: a real reel still returns `True`.
+4. **A link posted while nobody hosted arrives when someone starts.** Verified live: force a real gap,
+   paste a reel into it, start the bot, watch it deliver.
+5. Gates green, and every mutation in the must-stay-red list still red.
+
+### The risk to criterion 4, unmeasured and load-bearing
+**The launcher runs `getUpdates?timeout=0` before starting.** If that probe *consumes* the backlog, the
+whole feature is silently dead — a friend's launcher would eat the pending updates before the bot ever
+sees them. Bare `getUpdates` without an `offset` should not confirm anything (confirmation needs
+`offset = last_update_id + 1`), so my read is that it is safe — **but it is a read, and this is exactly
+the shape of premise that has been wrong before.** It cannot be measured without touching `getUpdates`,
+which is barred while the owner's poller is up. **First action once I have hosting.**
