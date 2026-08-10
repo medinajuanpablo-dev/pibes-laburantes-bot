@@ -189,6 +189,41 @@ command is the one that bites. **`_reply_text` still defaults to no parse mode**
 is load-bearing: the apology, the oversize line and the insult answer are unescaped Spanish, one of
 them carrying a raw URL.
 
+**Three things the reply says, because each one is an obstacle somebody actually hits.** `git` has
+to be there — on macOS running it without the Command Line Tools pops Apple's installer dialog, on
+Windows it is absent entirely and the reply links the installer. The **token comes from the owner,
+separately**, and the launcher asks for it on first run. And **only one person hosts at a time**,
+which is why the launcher asks before taking over (§2.1).
+
+**The clone URL is hardcoded, not derived.** `git remote get-url origin` would answer at runtime,
+but it would put a subprocess on a path anyone who can message the bot can trigger, and it would
+hand friends whatever *that host's* remote happens to be: an SSH remote (`git@github.com:…`) is
+useless to a friend with no GitHub account, and a copy with no `.git` — which both launchers
+tolerate and say so — would have nothing to give at all. The cost is a string that goes stale if the
+repository moves, and it cannot go stale *silently*: the self-check compares it against this
+checkout's own `origin` by `owner/repo`, so an SSH origin still matches, and separately refuses
+anything that is not `https://`. Verified 2026-08-09 with credential helpers disabled:
+`git ls-remote` on that URL answers anonymously, so a friend with no GitHub account can clone.
+
+#### The reply can never contain the token
+
+This is the one thing in the feature that can do real harm. The bot answers **anybody who can
+message it**, in any group it was added to, while the process holds the group's token in its
+environment. One interpolation turns onboarding into a credential leak.
+
+The guard is **invariance, not a filter**. A filter only catches the value it was told to look for.
+Instead, every string this feature can produce — the three builder variants *and* what `on_install`
+actually sends, in the DM and group forms — is built twice under two different, correctly shaped
+fake tokens, and once with no token in the environment at all, and all three runs must come out
+byte-identical. **A text that does not change when the token changes cannot contain it.** Name and
+shape asserts are kept alongside it, so an ordinary leak fails on three counts; the invariance
+assert is the one that catches a *transformed* leak, which the other two cannot see. The bait itself
+is asserted too: both fakes must match the token shape and must differ from each other, or the rule
+they arm is decoration.
+
+What makes it hold is that `install_reply` and everything under it read **nothing** — no
+environment, no file, no subprocess. That is a security property here, not a style preference.
+
 ### Self-check
 
 ```sh
@@ -802,6 +837,9 @@ a preference.
 |---|---|
 | Database, job queue, web framework, Docker | 20 links a week. Cost with no benefit. |
 | `systemd` unit, `launchd` plist, any process manager | Belongs to the port onto the spare Linux machine, not here. Adding it now ties the repo to macOS. |
+| Sending the launcher itself as a Telegram file attachment | A launcher on its own is inert, and a file that arrives over the network is quarantined (§2.2). The clone command is the same feature with neither problem. |
+| Sending the whole repository as a zip or a `git archive` | Size was never the obstacle — it is well under Telegram's document ceiling — but with no `.git` it can never `git pull`, so it is a snapshot that rots. That is the opposite of what was asked for. |
+| Deriving the clone URL from `git remote get-url origin` | A subprocess on a path anyone who can message the bot can trigger, and it would hand friends an SSH remote or nothing at all (§2.2). The staleness it would have prevented is pinned by the self-check instead. |
 | Auto-start for the launcher — a LaunchAgent, a Startup shortcut | The baton pass is manual on purpose. Two friends who each installed one would quietly re-create the 409 problem every morning, with nobody at the keyboard to answer the question the launcher asks. |
 | A cross-platform launcher, a Python bootstrapper, a shared config for the two scripts | Two ~100-line scripts that each read plainly in their own idiom beat one clever thing neither platform's user can debug. |
 | A lock file to answer "is anybody hosting?" | It would live on the wrong machine and go stale. Telegram's own 409 is the only authority, and asking costs one conflict (§4.9). |

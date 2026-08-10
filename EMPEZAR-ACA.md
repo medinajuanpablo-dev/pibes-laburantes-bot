@@ -12,6 +12,16 @@ pregunta con cuidado**: es lo único que decide con quién se queda el bot.
 
 ---
 
+## El camino corto
+
+Si el bot está prendido, mandale **`/instalar`** por privado o en el grupo y te contesta con el
+comando exacto para tu compu, listo para copiar. Podés pedirle el tuyo: `/instalar mac` o
+`/instalar windows`.
+
+Lo de abajo es lo mismo, explicado paso por paso. Si el bot está apagado, seguí por acá.
+
+---
+
 ## La primera vez
 
 ### 1. Bajar la carpeta del bot

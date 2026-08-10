@@ -121,6 +121,17 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   of them, or configuring a PTB `Defaults` object, would make the next stray character either vanish
   from the message or fail the send. Inside `/instalar`, every interpolated value goes through
   `html.escape`; the `&&` in the pasted command is the one that bites.
+- **The install reply is proved not to carry the token by *invariance*, not by a filter.** `/instalar`
+  answers anybody who can message the bot, in any group it was added to, while the process holds the
+  group's token in its environment. A "the token is not in the text" assert only catches the value it
+  was told to look for; the real guard builds every string the feature can produce under two
+  different fake tokens and once with none, and requires all three to be byte-identical — a text
+  that does not change when the token changes cannot contain it. That is why `install_reply` and
+  everything under it read nothing at all: no environment, no file, no subprocess. **Do not make any
+  of it read something**, and do not "improve" the guard into a redaction pass — a filter would let a
+  transformed leak through, which is exactly the mutation the invariance assert catches and the other
+  two do not. The two fakes must stay token-shaped and different from each other; both are asserted,
+  because bait that is not shaped like the quarry arms nothing. `README.md` §2.2.
 - **`_publish_commands` is the fourth place in this file that swallows an exception**, and it is the
   only one that is not on the delivery path. A `post_init` callback that raises aborts
   `run_polling`, so a network blip while publishing a *menu* would leave a friend staring at a
@@ -252,7 +263,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `_reply_text`'s default · `html.escape` dropped from the pasted command, so a raw `&&` reaches
   Telegram · a bare `/instalar` picking one platform instead of serving both · an unrecognised word
   erroring instead of meaning both · either platform's block naming the other's launcher, or the
-  pasted command stopping at the folder instead of opening the launcher.
+  pasted command stopping at the folder instead of opening the launcher ·
+  the token interpolated into the reply whole, as its secret half, from the handler instead of the
+  builder, or **reversed** (that last one is invisible to the name and shape asserts and is what the
+  invariance assert is for) · a fake token that is not token-shaped, or the two fakes made equal ·
+  `CLONE_URL` pointed at another repository or written as the ssh remote · `CLONE_DIR` keeping its
+  `.git` suffix · any of the three warnings dropped — the owner-hands-out-the-token line, the
+  one-host-at-a-time line, the macOS Command Line Tools dialog, or the Git-for-Windows link. Note
+  that a bare `"git" in text` assert is **vacuous**: the pasted command contains `git clone`.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.
@@ -308,7 +326,16 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked —
   including its `--take-over` path, which is the mirror of the macOS one whose branches *were*
   driven. Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to
-  watch.
+  watch. The line `/instalar windows` hands out ends in `./run-bot.cmd` **from Git Bash**, which is
+  a second untested thing on top of the first: Windows' `CreateProcess` runs a `.cmd` through
+  `cmd.exe`, which is why `./gradlew.bat` works there, but nobody has watched it here. Its failure
+  is recoverable — the clone has already happened by then and the reply also says the file is a
+  double-click from now on.
+- **Nobody has seen the install reply rendered by a Telegram client.** The HTML is asserted offline
+  — allowed tags only, no bare `&`, under the length ceiling — but no message has been sent, so
+  "the `<pre>` block offers tap-to-copy" is read from Telegram's documentation and not measured.
+  What to watch on the first real send: that the block renders as a block with a copy affordance,
+  that the `&&` arrives as `&&` and not `&amp;&amp;`, and that the whole thing is one message.
 - **Why yt-dlp coloured one ledger record and not the next is unknown**, and the search was stopped
   on purpose after the TTY theory was refuted (pipe and pseudo-TTY both produced no escapes). The
   strip is unconditional so the cause does not matter; do not gate it on a condition to "fix it
