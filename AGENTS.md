@@ -105,22 +105,34 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   probe sees `entries: 1`; without it, all of them. Anything measured with a raw
   `yt-dlp --dump-single-json` is therefore a different dict from the one the code gets — carousel
   work goes through `_carousel_options`. `README.md` §4.10.
-- **`is_image_post()` says yes to a failed extraction, and off Instagram its answer is
-  provisional.** `ignore_no_formats_error` does not suppress a broken Instagram extraction, but an
-  unavailable YouTube video reports itself through that same no-formats mechanism, so it comes back
-  from the probe with no formats and 38 thumbnails and the function says yes — measured 2026-08-09.
-  Its docstring said "a failed extraction never reaches this function at all"; that was Instagram
-  only. The discrimination it cannot make is finished in `_image_fallback`: **thumbnails that yield
-  no image mean the post never was an image post**, so the fallback returns None and
-  `download_into` re-raises the extractor's own words. Do not move that decision up into
-  `is_image_post` — `README.md` §4.8 lists the up-front signals and why each risks the working
-  image path. Nothing on the single-image fallback path may raise an error of its own; that error
-  would replace the extractor's and the ledger would record the fallback's opinion.
-- **A reply may never claim more than its signature carries, and three of the five cannot.**
+- **Only Instagram has image posts, and that is the first question `_image_fallback` asks.**
+  `is_image_post()` says yes to a *failed* extraction — `ignore_no_formats_error` does not suppress
+  a broken Instagram extraction, but YouTube reports both an unavailable video and a
+  `Sign in to confirm you're not a bot` challenge through that same no-formats mechanism, so the
+  probe comes back with no formats and 38 thumbnails and the function says yes (measured
+  2026-08-09). When the video is merely *blocked* rather than dead its thumbnails are **real**, one
+  downloads, and the group gets the poster frame of the video it asked for. No downstream guard can
+  see that, so the discrimination is the **site**: `has_image_posts()` reads the pasted URL's host,
+  and off Instagram the fallback declines before it probes. Host, not yt-dlp's `extractor` key —
+  the host is known before the probe and is the same rule `is_supported()` uses (`_host_is_one_of`).
+  This also removed the ~38 pointless thumbnail fetches a failing YouTube link used to cost.
+- **Inside Instagram the older guard still carries everything**: **thumbnails that yield no image
+  mean the post never was an image post**, so the fallback returns None and `download_into`
+  re-raises the extractor's own words. The host guard took away that guard's only cover (the dead
+  YouTube link) and mutation testing caught it going green — its check is an Instagram case now,
+  and it is not redundant. Do not move either decision up into `is_image_post` — `README.md` §4.8
+  lists the up-front signals and why each risks the working image path. Nothing on the single-image
+  fallback path may raise an error of its own; that error would replace the extractor's and the
+  ledger would record the fallback's opinion.
+- **A reply may never claim more than its signature carries, and three of the six cannot.**
   Facebook's `Cannot parse data` also fires on a good URL under rate limiting, and YouTube's
   deleted and private are byte-identical, so those replies offer both readings. `README.md` §5.2.
   An unrecognised failure must stay `FAILURE_REPLY` — the feature adds precision where precision
-  exists and must never turn an unknown into a guess.
+  exists and must never turn an unknown into a guess. The mirror holds too: the bot-check row does
+  **not** hedge, because that signature is not ambiguous.
+- **The bot-check row is the one signature nobody on this branch could re-measure**, and its
+  markers step around the apostrophe in `you're` on purpose — that character comes from YouTube's
+  JSON and a typographic one would kill the row as silently as a capital would. `README.md` §5.2.
 - **`carousel_slides`' per-entry `formats` guard cannot be covered live.** It only runs once a video
   carousel's download has already failed, and no public URL sits in that state. The live all-video
   carousel in `SELF_CHECK_URLS` proves something weaker — that video carousels still belong to the
@@ -141,8 +153,16 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `delivery_decision` `<=` → `<` · the ignore-logging dropping its rejected URLs or leaking the body ·
   `is_image_post` dropping its `formats` or carousel guard · the thumbnail chosen by list order
   rather than by size · the image fallback raising its own error instead of declining when no
-  thumbnail yields an image (that is the lost YouTube diagnosis, and it passes every other check) ·
-  that same branch declining when an image *did* come down (an image post must still be sent) · `main` not registering `on_error` · the conflict handler's `quiet` branch ·
+  thumbnail yields an image (that is the lost YouTube diagnosis, and it passes every other check —
+  its only live cover was the dead YouTube link and the host guard took that away, so it is driven
+  on Instagram now) ·
+  that same branch declining when an image *did* come down (an image post must still be sent) ·
+  the image fallback running for a site with no image posts — removed, inverted, moved after the
+  probe (the calls are asserted, not only the outcome), `IMAGE_POST_HOSTS` widened to every
+  supported host, emptied, or losing `instagr.am` · `_host_is_one_of` dropping its subdomain arm or
+  matching the URL as a substring · the bot-check row deleted, keyed on the apostrophe, written
+  with a capital, losing its `[youtube]` marker, or rewritten as a hedge ·
+  `main` not registering `on_error` · the conflict handler's `quiet` branch ·
   `CONFLICT_GRACE` set to 0 (a probe would then kill a healthy bot) · the episode reset in
   `conflict_action` · the Spanish line the person at the window reads ·
   `take_over_requested` reading nothing, reading everything, or matching loosely enough that a typo
@@ -228,12 +248,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   on purpose after the TTY theory was refuted (pipe and pseudo-TTY both produced no escapes). The
   strip is unconditional so the cause does not matter; do not gate it on a condition to "fix it
   properly", and do not restart the hunt for a cosmetic defect.
-- **A dead YouTube link still costs ~38 pointless thumbnail requests.** The lost-diagnosis half of
-  this was fixed (bullet above); the cost was not. Cutting it needs a signal available *before* the
-  fetch, and every candidate measured is a property of today's yt-dlp or today's YouTube that would
-  put the working image path at risk to save requests on a link that is already failing
-  (`README.md` §4.8). Not worth it at ~20 links a week. Do not re-open without a signal that cannot
-  misfire on an image post.
+- **The ~38 pointless thumbnail requests a dead YouTube link used to cost are gone**, as a side
+  effect of the host guard rather than as a goal: the fallback now declines before it probes, so a
+  failing YouTube or Facebook link makes no extra request at all. The open question this replaces —
+  finding an up-front signal *inside* Instagram — is still closed for the same reason as before
+  (`README.md` §4.8): every candidate risks the working image path. Do not re-open it.
 - **Only five failures are named; everything else is still `no pude bajar ese link`.** That is the
   design, not a gap. A row costs a measurement against the live site — never a guess from an issue
   tracker or from what an error "probably" says.

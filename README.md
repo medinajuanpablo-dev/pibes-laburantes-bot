@@ -311,16 +311,44 @@ so **on Instagram** a genuinely broken extraction never reaches the fallback.
 *same* no-formats mechanism the flag suppresses — `raise_no_formats(reason, expected=True)` in the
 extractor — so the probe returns instead of raising, with **0 formats and 38 thumbnails**, and
 `is_image_post()` says yes to a failed extraction. Its answer is therefore *provisional* off
-Instagram, and the fallback finishes the discrimination one step later: those 38 thumbnails are
-synthesised from a URL template (`i.ytimg.com/vi/<id>/…`, each carrying a `preference` key an
-Instagram thumbnail does not have) and every one of them 404s, so **no image comes down, the
-fallback declines, and `download_into` re-raises yt-dlp's own `Video unavailable`** (§5.2).
+Instagram, and the fallback used to finish the discrimination one step later: those 38 thumbnails
+are synthesised from a URL template (`i.ytimg.com/vi/<id>/…`, each carrying a `preference` key an
+Instagram thumbnail does not have) and every one of them 404s, so no image came down and the
+fallback declined.
 
-"Thumbnails that yield no image" is the only sound signal here. Every up-front one measured — the
-`preference` key, the placeholder title `youtube video #<id>`, the thumbnail count — is a property
-of today's yt-dlp or today's YouTube, and keying the *working* image path on any of them would risk
-turning a real image post into an apology in order to save requests on a link that is failing
-anyway. So the ~38 fetches on a dead YouTube link are accepted; only the lost diagnosis was fixed.
+**Provisional was not enough. On 2026-08-09 a YouTube short came back as its poster frame.**
+YouTube was challenging the owner's address — `Sign in to confirm you're not a bot` — and the
+extractor reports *that* through the same `raise_no_formats(reason, expected=True)` arm, so the
+probe returned 0 formats and 38 thumbnails exactly like a dead video. One difference is fatal:
+**the video exists, so its thumbnails are real.** One came down, the group got a still frame of the
+video it had asked for, nobody learned that YouTube was blocked, and the ledger recorded a
+success-shaped nothing. Neither guard could fire: there genuinely were no formats, and there
+genuinely was an image.
+
+**The fix is the site, asked before anything else runs: only Instagram has image posts at all.**
+`has_image_posts()` reads the pasted URL's host against `IMAGE_POST_HOSTS`; off Instagram
+`_image_fallback` returns `None` on its first line and `download_into` re-raises what the extractor
+said. That kills the class instead of the symptom — a YouTube or Facebook link that fails to
+extract is a failed video, whatever the reason, today's or next year's — and it is free: **a
+failing YouTube link no longer pays for the probe or for the ~38 thumbnail fetches** that earlier
+revisions of this section recorded as an accepted cost.
+
+The **host** is the signal, not yt-dlp's `extractor` key. It is known *before* the probe, while
+`extractor` exists only after an extraction that succeeded; and it is the same question
+`is_supported()` already asks about the same string, so `_host_is_one_of()` answers both and the
+two cannot drift apart. They can disagree — a `facebook.com/share/v/` link redirects internally,
+and the self-check's own share link comes back as `1547227326881971.mp4` — but both readings say
+"not Instagram", and every way this signal can be wrong ends in the apology rather than in a still
+frame.
+
+"Thumbnails that yield no image" is still the sound signal **inside** Instagram, and it is not
+redundant with the host guard: the host guard covers the sites that have no image posts, this one
+covers the site that does — an Instagram post whose signed thumbnail URLs all fail. It is also the
+guard whose only cover the host guard took away, since the dead YouTube link no longer reaches it;
+mutation testing caught that, and the check now drives it on Instagram. Every up-front signal
+measured on top of it — the `preference` key, the placeholder title `youtube video #<id>`, the
+thumbnail count — is a property of today's yt-dlp or today's YouTube, and keying the *working*
+image path on any of them would risk turning a real image post into an apology.
 
 **Carousels of images are albums; anything with a video slide in it is still refused.** See §4.10.
 
@@ -501,6 +529,14 @@ their pages without warning, and that is this project's real failure mode.
    been deprecated."* It is harmless today (2160p and merged 720p both resolve without one) and no
    runtime is installed on purpose — this project is meant to be copied onto an old Linux box. The
    escape hatch is `--js-runtimes node` or installing `deno`.
+
+   **That suspect was wrong once already, on the failure that looks most like it.** When YouTube
+   answers `Sign in to confirm you're not a bot` the JS runtime is not involved: forcing
+   `--js-runtimes node` produced the identical error (owner, 2026-08-09). That failure is YouTube
+   challenging *this address* — usually after a burst of extractions — every YouTube link in the
+   group fails while it lasts, and it clears on its own. The bot now says so in Spanish (§5.2)
+   instead of answering with a poster frame (§4.8). The operator action, if it does not clear: put a
+   cookies file somewhere and point `YTDLP_COOKIES` at it (§4.7). Waiting is usually cheaper.
 5. **A video arrives as a grey file row instead of playing** → the format string picked AV1 or a
    webm. §4.1 and §4.2. The self-check catches this; run it.
 6. **The log says `another instance has taken the poll`** → somebody else opened a launcher. One
@@ -569,9 +605,10 @@ path, and it may never cost the group its apology.
 matches, and anything it does not recognise is still `no pude bajar ese link`, exactly as before.
 The table is data and the matcher is logic — adding a failure is adding a row.
 
-Every row below is a signature measured on 2026-08-09 by running `download_into` against the live
-site. **Not** by reading `yt-dlp --simulate`: what `download_into` produces is what the bot
-classifies, and only running it proves the two are the same string.
+Every row below is a signature measured by running `download_into` against the live site — **not**
+by reading `yt-dlp --simulate`, because what `download_into` produces is what the bot classifies,
+and only running it proves the two are the same string. Five were measured on 2026-08-09; the sixth
+is marked and explained under the table.
 
 | What happened | Matched on | The group hears |
 |---|---|---|
@@ -580,12 +617,27 @@ classifies, and only running it proves the two are the same string.
 | An Instagram **profile** URL, not a post | `[instagram:user]` + `unable to extract data` | *ese link es de un perfil…, pasame el del reel o la foto* |
 | Facebook post dead **or** Facebook throttling | `[facebook]` + `cannot parse data` | *…puede que ya no exista o que facebook me esté frenando. probá de nuevo en un rato* |
 | A YouTube video that is deleted **or** private | `[youtube]` + `video unavailable` | *…puede que lo hayan borrado o que sea privado* |
+| YouTube challenging this address † | `[youtube]` + `sign in to confirm` + `not a bot` | *youtube me está bloqueando…: no es culpa del link, probá de nuevo más tarde* |
 
-**Three of those five hedge, and that is the rule, not a hesitation.** Facebook's `Cannot parse
+**Three of those six hedge, and that is the rule, not a hesitation.** Facebook's `Cannot parse
 data` fires on a perfectly good URL under rate limiting — an earlier agent hit exactly that after
 five self-checks in 25 minutes — so "ese post no existe" would be a confident lie about half the
 time. YouTube cannot distinguish deleted from private: `watch?v=AAAAAAAAAAA` and `?v=ZZZZZZZZZZZ`
 produce byte-identical text. A reply may never claim more than its signature carries.
+
+**The last row is the mirror of that rule and the one exception to the measurement rule.** It does
+*not* hedge, because the signature does not: YouTube says plainly that it wants a login, so the
+group is told the one thing it can act on — the link is fine, the bot is blocked. The **operator**
+action lives in §5 item 4 and in `YTDLP_COOKIES`, not in a sentence written for a friend.
+
+† **This is the only row the branch that added it could not re-measure.** The owner hit it on
+`youtube.com/shorts/5kC43KL_mBE` on 2026-08-09 and pasted the error; by the time the fix was
+written the challenge on that address had lifted (the same short extracts 28 formats), so the
+string in the self-check is his paste plus the tail yt-dlp 2026.7.4 appends to it —
+`_login_hint("cookies")` in `extractor/common.py`, wrapped by `_youtube_login_hint` in
+`extractor/youtube/_base.py`. The markers deliberately step **around** the apostrophe in `you're`:
+that character arrives from YouTube's own JSON, and a typographic one would kill the row silently,
+the same way a capital would. Both spellings are asserted.
 
 **The last row used to be keyed on the bot's own sentence, and that was a defect, not a design.**
 Until 2026-08-09 the image fallback answered a dead YouTube link with `has no video and no

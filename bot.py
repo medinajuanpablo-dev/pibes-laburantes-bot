@@ -179,6 +179,28 @@ SUPPORTED_HOSTS = frozenset(
     }
 )
 
+# The subset of the above that has image posts AT ALL. YouTube and Facebook serve
+# video; a link to either that fails to extract is a failure, full stop, and can
+# never be "a post with no video in it". Only Instagram can, so only Instagram may
+# reach the image fallback -- see _image_fallback for the defect this closes.
+#
+# The signal is the HOST OF THE PASTED URL, not yt-dlp's `extractor` key, and the
+# two can disagree. Three reasons, in order of weight:
+#   * The host is known BEFORE the fallback probe, so a failing YouTube link now
+#     costs zero extra requests instead of a probe plus ~38 thumbnail fetches.
+#   * The `extractor` key only exists when an extraction SUCCEEDED, and the whole
+#     point here is what to do after one failed. On a bot-challenged YouTube link
+#     the probe does return "youtube", but reading it means paying for the probe
+#     to learn what the URL already said.
+#   * It is the same question is_supported() already answers about the same string,
+#     so there is one host rule in this file rather than two that can drift apart.
+# What the disagreement costs is measured and one-sided: a facebook.com/share/v/
+# link redirects internally (the self-check's own share/v/ URL comes back as
+# `1547227326881971.mp4`), so host and extractor could in principle diverge -- but
+# both readings say "not Instagram", and every way this signal can be wrong ends in
+# the apology rather than in a still frame.
+IMAGE_POST_HOSTS = frozenset({"instagram.com", "instagr.am"})
+
 # Only scheme-carrying URLs count HERE. A bare "instagram.com" mentioned mid-sentence
 # is someone talking about a site, not a link to fetch -- and this pattern has no way
 # to tell those apart, which is why it keeps insisting on a scheme.
@@ -278,6 +300,27 @@ FAILURE_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
     # and an unreachable row is the thing this table's checks exist to catch.
     (("[youtube]", "video unavailable"),
      "no encontré nada para bajar en ese link: puede que lo hayan borrado o que sea privado"),
+    # youtube.com/shorts/5kC43KL_mBE -- YouTube challenging this IP, which is what
+    # made the bot answer a blocked video with its poster frame (README.md §4.8).
+    # The reply does NOT hedge because the signature does not: YouTube says plainly
+    # that it wants a login, and the one thing the group can usefully be told is
+    # that the link is fine and the bot is not. The person hosting has an action
+    # here that nobody else does -- YTDLP_COOKIES -- and it belongs in the log and
+    # in README.md §5, not in a sentence written for a friend.
+    #
+    # MEASURED BY THE OWNER, NOT RE-MEASURED HERE, and that is the one row where
+    # this is true. He pasted the URL above on 2026-08-09 and quoted the error; by
+    # the time this branch was written the challenge on this IP had already lifted
+    # (`5kC43KL_mBE` extracts 28 formats), so the string below is his paste plus the
+    # rest of the sentence read off yt-dlp 2026.7.4 -- extractor/common.py's
+    # `_login_hint("cookies")` and youtube/_base.py's `_youtube_login_hint`.
+    # The markers deliberately step AROUND the apostrophe in "you're": that
+    # character comes from YouTube's own JSON and a typographic one would silently
+    # kill the row, which is the failure this table's casefold rule already guards
+    # against for capitals.
+    (("[youtube]", "sign in to confirm", "not a bot"),
+     "youtube me está bloqueando y no me deja bajar ese video: no es culpa del link, "
+     "probá de nuevo más tarde"),
 )
 
 # Every supported link that does not end in delivered media is written here, one
@@ -528,15 +571,22 @@ def is_image_post(info: dict | None) -> bool:
     formats and 38 thumbnails, so THIS FUNCTION SAYS TRUE FOR A FAILED EXTRACTION.
 
     So this function's answer is provisional off Instagram, and nothing keyed on it
-    may treat it as final. The discrimination it cannot make -- "video-less post" vs
-    "extraction that produced nothing" -- is made one step later, in _image_fallback,
-    by the only signal that is not a guess: whether any of those thumbnails yields an
-    image. None of the 38 does, because YouTube's are synthesised from a URL template
-    rather than extracted, so the fallback declines and the caller re-raises yt-dlp's
-    own "Video unavailable". Do not try to move that decision up here: the metadata
-    an image post and a dead video hand back is the same shape, and every up-front
-    signal available (a `preference` key, a placeholder title, a thumbnail count)
-    would put the WORKING image path at risk to save requests on a failing one.
+    may treat it as final. TODAY IT IS NEVER ASKED OFF INSTAGRAM: _image_fallback
+    checks the pasted URL's host first and declines for every other site, because a
+    site with no image posts cannot have one. That guard is upstream of this
+    function and stays upstream of it -- this one keeps answering about the dict it
+    is given, which is what makes it assertable with plain dicts.
+
+    Below that guard the discrimination this function cannot make -- "video-less
+    post" vs "extraction that produced nothing" -- is still made one step later, in
+    _image_fallback, by the only signal that is not a guess: whether any thumbnail
+    yields an image. That guard is what stops an Instagram extraction that produced
+    nothing, and it is NOT redundant with the host one: the host guard covers the
+    sites that have no image posts, this one covers the site that does. Do not try
+    to move either decision up here: the metadata an image post and a dead video
+    hand back is the same shape, and every up-front signal available (a `preference`
+    key, a placeholder title, a thumbnail count) would put the WORKING image path at
+    risk to save requests on a failing one.
 
     Note what is NOT used here: `duration` is None for the image post AND for a
     working reel, and `title` is "Video by <author>" even for an image, because that
@@ -619,7 +669,26 @@ def _image_fallback(url: str, target_dir: Path) -> Media | None:
     the same info dict -- so the carousel costs the single-image path no extra round
     trip. `is_image_post` is asked first and the two are disjoint by construction:
     it refuses anything with entries, and a carousel needs at least two of them.
+
+    THE FIRST QUESTION IS THE SITE, and it is asked before anything else runs. The
+    owner pasted a YouTube short on 2026-08-09 and got a still frame back: YouTube
+    was challenging this IP ("Sign in to confirm you're not a bot"), the extractor
+    reports that through the same no-formats mechanism `ignore_no_formats_error`
+    suppresses, so the probe returned no formats and 38 thumbnails, `is_image_post`
+    said yes -- and unlike the dead-video case, the video EXISTS, so its thumbnails
+    are real and one of them came down. Neither guard below can fire on that: there
+    are genuinely no formats, and there genuinely is an image. The discrimination
+    that works is the one nothing here was using -- only Instagram has image posts
+    at all -- and it kills the whole class instead of the one symptom. It is also
+    free: a failing YouTube link no longer pays for a probe and ~38 thumbnail
+    fetches to arrive at the same apology.
     """
+    if not has_image_posts(url):
+        # Not a hedge and not a cost saving: on this site "a post with no video in
+        # it" does not exist, so there is nothing for this function to find and the
+        # caller must re-raise what the extractor said.
+        log.info("%s is not a site with image posts; keeping the original failure", url)
+        return None
     try:
         with yt_dlp.YoutubeDL(_carousel_options(target_dir)) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -944,10 +1013,31 @@ def message_urls(message: telegram.Message) -> list[str]:
     return urls
 
 
+def _host_is_one_of(url: str, hosts: frozenset[str]) -> bool:
+    """Whether `url`'s host is one of `hosts`, or a subdomain of one.
+
+    One host rule for the two questions this file asks about a pasted URL -- "do we
+    handle this site" and "can this site have image posts" -- so a subdomain or a
+    short form can never be read one way by one of them and the other way by the
+    other. `m.instagram.com` is Instagram to both, or to neither.
+    """
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return host in hosts or any(host.endswith("." + h) for h in hosts)
+
+
 def is_supported(url: str) -> bool:
     """Whether the URL points at one of the three sites the group actually pastes."""
-    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
-    return host in SUPPORTED_HOSTS or any(host.endswith("." + h) for h in SUPPORTED_HOSTS)
+    return _host_is_one_of(url, SUPPORTED_HOSTS)
+
+
+def has_image_posts(url: str) -> bool:
+    """Whether a post on this site can be images-only, i.e. whether it is Instagram.
+
+    The one question the image fallback asks before it does anything. A YouTube or
+    Facebook link that failed to extract is a failed video, and answering it with a
+    still frame is the defect this closes (README.md §4.8).
+    """
+    return _host_is_one_of(url, IMAGE_POST_HOSTS)
 
 
 def media_kind(filename: str | Path, has_audio: bool = True) -> str:
@@ -2183,6 +2273,12 @@ def _check_failure_replies() -> None:
             "ERROR: [facebook] 999999999999999: Cannot parse data; please report this "
             "issue on  https://github.com/yt-dlp/yt-dlp/issues?q= , filling out the "
             "appropriate issue template.",
+        # The owner's paste of 2026-08-09 plus the tail yt-dlp appends to it. NOT
+        # re-measured here and the only row where that is true: the challenge on
+        # this IP lifted before the fix was written. See BOT_CHECK_ERROR.
+        "youtube, challenging this address":
+            "yt-dlp could not download https://youtube.com/shorts/5kC43KL_mBE: "
+            + BOT_CHECK_ERROR,
     }
     replies = {label: failure_reply(detail) for label, detail in measured.items()}
     for label, reply in replies.items():
@@ -2208,6 +2304,25 @@ def _check_failure_replies() -> None:
         "throttling is temporary, so the facebook line has to say to retry"
     assert "perfil" in replies["instagram, a profile URL not a post"], replies
     assert "no es público" in replies["instagram, audience-restricted"], replies
+
+    # And the mirror image of that rule: a signature that IS unambiguous must not
+    # hedge. YouTube says plainly that it wants a login, so "puede que" here would
+    # be a hesitation the evidence does not call for -- and the group is told the
+    # one thing it can act on, that the link is not the problem.
+    blocked = replies["youtube, challenging this address"]
+    assert "puede que" not in blocked, f"this one is not ambiguous: {blocked}"
+    assert blocked != replies["youtube, unavailable (A)"], \
+        "a blocked video and a deleted one are different failures with different answers"
+    # The markers step around the apostrophe in "you're" on purpose: it comes from
+    # YouTube's own JSON, and a typographic one would kill the row silently. Both
+    # spellings must land on the same line.
+    assert failure_reply(
+        "ERROR: [youtube] x: Sign in to confirm you’re not a bot. "
+        "Use --cookies-from-browser or --cookies for the authentication."
+    ) == blocked, "a typographic apostrophe must not be able to kill the row"
+    # Half of it is not it: YouTube's OTHER sign-in wall is the age one, and it is a
+    # different failure with no measured signature, so it stays generic.
+    assert failure_reply("ERROR: [youtube] x: Sign in to confirm your age") == FAILURE_REPLY
 
     # A friend reads these: Spanish, lower case, one line, no jargon and no codes.
     for markers, reply in FAILURE_SIGNATURES:
@@ -2303,62 +2418,120 @@ def _check_failure_replies() -> None:
     print("ok  _deliver tells the group the cause and still records the raw detail")
 
 
+@contextmanager
+def _yt_dlp_stub(
+    workspace: Path,
+    info: dict,
+    video_error: str,
+    image: str | None = None,
+    slides: int = 0,
+) -> Iterator[list[str]]:
+    """yt-dlp replaced by a stand-in, yielding the list of what it was asked to do.
+
+    The fallback's whole behaviour is "which network calls happen after a download
+    failed", so the check has to be able to assert that a call did NOT happen, not
+    only that the outcome was right. Each `extract_info` appends one of "video",
+    "probe", "thumbnails" or "slides"; the three are told apart the same way the
+    real options tell them apart -- `download`, `skip_download` and the playlist cap.
+
+    `image` is the file the thumbnail run leaves behind, or None for a run that
+    yields nothing; `slides` is how many carousel files the album run writes.
+    """
+    asked: list[str] = []
+    jpeg = b"\xff\xd8\xff" + b"x" * 4000
+
+    class _FakeYdl:
+        def __init__(self, options: dict) -> None:
+            self.options = options
+
+        def __enter__(self) -> "_FakeYdl":
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+        def extract_info(self, _url: str, download: bool = False) -> dict:
+            if not download:
+                asked.append("probe")
+                return info
+            # The thumbnail and carousel runs both skip the video; only the carousel
+            # one lifts the one-item cap, exactly as _download_carousel_slides does.
+            if self.options.get("skip_download"):
+                if self.options.get("playlist_items") == f"1:{ALBUM_MAX_ITEMS}":
+                    asked.append("slides")
+                    for n in range(1, slides + 1):
+                        (workspace / f"slide-{n:03d}.12.jpg").write_bytes(jpeg + bytes(n))
+                    return info
+                asked.append("thumbnails")
+                if image is not None:
+                    (workspace / image).write_bytes(jpeg)
+                return info
+            asked.append("video")
+            raise yt_dlp.utils.DownloadError(video_error)
+
+    class _FakeYtDlp:
+        YoutubeDL = _FakeYdl
+        utils = yt_dlp.utils
+
+    real = globals()["yt_dlp"]
+    globals()["yt_dlp"] = _FakeYtDlp
+    try:
+        yield asked
+    finally:
+        globals()["yt_dlp"] = real
+
+
+def _attempt_download(url: str, workspace: Path, **stub: object) -> tuple[Media | str, list[str]]:
+    """download_into with yt-dlp stubbed out: the Media or the error text, and the calls."""
+    with _yt_dlp_stub(workspace, **stub) as asked:  # type: ignore[arg-type]
+        try:
+            return download_into(url, workspace), asked
+        except ExtractionError as exc:
+            return str(exc), asked
+
+
+# What an unavailable YouTube video really hands back: no formats and 38 thumbnails
+# synthesised from a URL template, each with a `preference` an Instagram thumbnail
+# does not have. Measured 2026-08-09. A bot-challenged video hands back the same
+# SHAPE -- which is the entire reason neither guard downstream can tell them apart.
+DEAD_YOUTUBE_INFO = {
+    "formats": [],
+    "thumbnails": [{"id": str(n), "url": f"https://i.ytimg.com/vi/AAAAAAAAAAA/{n}.jpg",
+                    "preference": n - 37} for n in range(38)],
+}
+
+# The failure the owner hit on 2026-08-09, and the only signature in this file the
+# owner measured and the branch could not re-measure: the challenge on this IP had
+# lifted by the time the fix was written (5kC43KL_mBE extracts 28 formats again).
+# His paste is the first sentence; the rest is yt-dlp 2026.7.4's own text, read off
+# extractor/common.py `_login_hint("cookies")` + youtube/_base.py
+# `_youtube_login_hint`, which is what appends it.
+BOT_CHECK_ERROR = (
+    "ERROR: [youtube] 5kC43KL_mBE: Sign in to confirm you're not a bot. "
+    "Use --cookies-from-browser or --cookies for the authentication. "
+    "See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  "
+    "for how to manually pass cookies. "
+    "Also see  https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies  "
+    "for tips on effectively exporting YouTube cookies"
+)
+
+
 def _check_failed_extraction_keeps_its_error() -> None:
     """A failed extraction reaches the ledger as the EXTRACTOR's words, not the bot's.
 
-    The whole slice, end to end, with the network removed: yt-dlp itself is replaced
-    by a stand-in that raises on the video download, hands the fallback the info dict
-    an unavailable YouTube video really returns (no formats, 38 synthesised
-    thumbnails -- measured 2026-08-09), and writes an image or not depending on the
-    case. Both branches of the discrimination are covered, because a fix that made
-    every image post fail would pass the negative half on its own.
+    The whole slice, end to end, with the network removed: yt-dlp is replaced by the
+    stand-in above, which raises on the video download and then hands the fallback
+    the info dict an unavailable YouTube video really returns. Both branches of the
+    discrimination are covered, because a fix that made every image post fail would
+    pass the negative half on its own -- and the positive half is an INSTAGRAM post,
+    because since the host guard landed a YouTube URL cannot reach that path at all.
     """
     unavailable = "ERROR: [youtube] AAAAAAAAAAA: Video unavailable"
-    dead_youtube = {
-        "formats": [],
-        "thumbnails": [{"id": str(n), "url": f"https://i.ytimg.com/vi/AAAAAAAAAAA/{n}.jpg",
-                        "preference": n - 37} for n in range(38)],
-    }
-
-    def _attempt(workspace: Path, info: dict, image: str | None) -> Media | str:
-        """download_into with yt-dlp stubbed out. Returns the Media or the error text."""
-
-        class _FakeYdl:
-            def __init__(self, options: dict) -> None:
-                self.options = options
-
-            def __enter__(self) -> "_FakeYdl":
-                return self
-
-            def __exit__(self, *_exc: object) -> bool:
-                return False
-
-            def extract_info(self, _url: str, download: bool = False) -> dict:
-                # The thumbnail run is the only one that downloads while skipping the
-                # video; that is the call that either produces an image or does not.
-                if download and self.options.get("skip_download"):
-                    if image is not None:
-                        (workspace / image).write_bytes(b"\xff\xd8\xff" + b"x" * 4000)
-                    return info
-                if download:
-                    raise yt_dlp.utils.DownloadError(unavailable)
-                return info
-
-        class _FakeYtDlp:
-            YoutubeDL = _FakeYdl
-            utils = yt_dlp.utils
-
-        real = globals()["yt_dlp"]
-        globals()["yt_dlp"] = _FakeYtDlp
-        try:
-            return download_into("https://www.youtube.com/watch?v=AAAAAAAAAAA", workspace)
-        except ExtractionError as exc:
-            return str(exc)
-        finally:
-            globals()["yt_dlp"] = real
-
     with temp_workspace() as workspace:
-        failed = _attempt(workspace, dead_youtube, image=None)
+        failed, asked = _attempt_download(
+            "https://www.youtube.com/watch?v=AAAAAAAAAAA", workspace,
+            info=DEAD_YOUTUBE_INFO, video_error=unavailable, image=None,
+        )
     assert isinstance(failed, str), f"a dead video must not be delivered as anything: {failed}"
     assert unavailable in failed, f"the extractor's own words must survive: {failed}"
     assert "no downloadable image either" not in failed, (
@@ -2373,11 +2546,128 @@ def _check_failed_extraction_keeps_its_error() -> None:
 
     # The other half: a post that really is video-less still becomes a photo. Without
     # this, "always return None" passes everything above.
+    empty_media = "ERROR: [Instagram] DbvWPFQxPkI: There is no video in this post"
+    image_post = {"formats": [], "thumbnails": [{"id": "12", "url": "https://x/a.jpg"}]}
     with temp_workspace() as workspace:
-        delivered = _attempt(workspace, dead_youtube, image="best.jpg")
+        delivered, asked = _attempt_download(
+            "https://www.instagram.com/p/DbvWPFQxPkI/", workspace,
+            info=image_post, video_error=empty_media, image="best.jpg",
+        )
     assert isinstance(delivered, Media), f"an image that downloads must still be sent: {delivered}"
     assert delivered.path.name == "best.jpg" and not delivered.has_audio, delivered
+    assert asked == ["video", "probe", "thumbnails"], asked
+
+    # The third branch, and READ THIS BEFORE MOVING IT: "thumbnails that yield no
+    # image mean the post never was an image post". Its cover used to be the dead
+    # YouTube link, and the host guard took that away -- YouTube does not reach the
+    # fallback at all any more, so deleting this branch went green until this case
+    # existed (caught by mutation testing, 2026-08-09). The guard is still
+    # load-bearing where it still runs: an Instagram post whose signed thumbnail
+    # URLs all fail leaves the fallback with nothing, and raising an error of its
+    # own there would put the FALLBACK's opinion in the ledger instead of the
+    # extractor's, which is the defect the previous branch fixed.
+    with temp_workspace() as workspace:
+        nothing, asked = _attempt_download(
+            "https://www.instagram.com/p/DbvWPFQxPkI/", workspace,
+            info=image_post, video_error=empty_media, image=None,
+        )
+    assert isinstance(nothing, str), f"no image means the failure stands: {nothing}"
+    assert empty_media in nothing, f"the extractor's own words must survive: {nothing}"
+    assert "no downloadable image either" not in nothing, (
+        f"the fallback's error replaced the extractor's, which is the whole defect: {nothing}"
+    )
+    assert asked == ["video", "probe", "thumbnails"], asked
     print("ok  a failed extraction keeps its own error all the way to the ledger")
+
+
+def _check_only_instagram_can_be_an_image_post() -> None:
+    """A site with no image posts never reaches the image fallback at all.
+
+    The defect this closes, in one line: a YouTube video the site refuses to serve
+    comes back from the fallback probe with no formats and REAL thumbnails, so
+    `is_image_post` says yes and one of them downloads -- and the group gets a still
+    frame of a video it asked for. Neither existing guard can fire on that, which is
+    why the discrimination is the site.
+
+    Dict-driven and no network. The cases below are the two failing sites, the two
+    Instagram host spellings and both Instagram post shapes; what is asserted is not
+    only the outcome but WHICH CALLS HAPPENED, because "never reaches the image
+    path" is a statement about calls, and an implementation that probed first and
+    threw the answer away would pass an outcome-only check.
+    """
+    for url in ("https://www.instagram.com/p/x/", "https://instagram.com/reel/x/",
+                "https://instagr.am/p/x/", "https://m.instagram.com/p/x/",
+                "https://INSTAGRAM.COM/p/x/"):
+        assert has_image_posts(url), f"{url} is Instagram and can be an image post"
+    for url in ("https://www.youtube.com/watch?v=x", "https://youtu.be/x",
+                "https://youtube.com/shorts/5kC43KL_mBE", "https://www.youtube-nocookie.com/x",
+                "https://www.facebook.com/share/v/1L8yZSLkWq/",
+                "https://www.facebook.com/share/r/1L8yZSLkWq/",
+                "https://fb.watch/x/", "https://fb.com/x", "https://www.tiktok.com/@a/video/1",
+                "https://notinstagram.com/p/x/", "https://instagram.com.evil.example/p/x/",
+                "not a url at all", ""):
+        assert not has_image_posts(url), f"{url} has no image posts and must keep its error"
+    # A site the bot does not even handle can never be the one site that has image
+    # posts; is_supported is the outer gate and this is a subset of it.
+    assert IMAGE_POST_HOSTS <= SUPPORTED_HOSTS, IMAGE_POST_HOSTS - SUPPORTED_HOSTS
+    for host in IMAGE_POST_HOSTS:
+        assert is_supported(f"https://{host}/p/x/"), host
+
+    # The live defect, with an image that WOULD have come down. This is the case the
+    # thumbnail guard cannot catch: the video exists, so its thumbnails are real.
+    with temp_workspace() as workspace:
+        blocked, asked = _attempt_download(
+            "https://youtube.com/shorts/5kC43KL_mBE", workspace,
+            info=DEAD_YOUTUBE_INFO, video_error=BOT_CHECK_ERROR, image="poster.jpg",
+        )
+    assert isinstance(blocked, str), f"a blocked video must never be delivered as a still: {blocked}"
+    assert "Sign in to confirm" in blocked, f"the extractor's own words must survive: {blocked}"
+    assert asked == ["video"], f"nothing may run after the download failed off Instagram: {asked}"
+    # And the group is told the truth about it, in its own line.
+    named = failure_reply(blocked)
+    assert named != FAILURE_REPLY, f"the bot check is measured and must be named: {named}"
+    assert named != failure_reply("ERROR: [youtube] x: Video unavailable"), \
+        "a blocked video and a deleted one are different things and must read differently"
+    assert "youtube" in named and "puede que" not in named, \
+        f"this signature is not ambiguous, so the line must not hedge: {named}"
+
+    # Facebook is the other site with no image posts, and its share/v/ links are the
+    # ones whose host and extractor could disagree. Same answer either way.
+    with temp_workspace() as workspace:
+        facebook, asked = _attempt_download(
+            "https://www.facebook.com/share/v/1L8yZSLkWq/", workspace,
+            info=DEAD_YOUTUBE_INFO, video_error="ERROR: [facebook] 1: Cannot parse data",
+            image="poster.jpg",
+        )
+    assert isinstance(facebook, str), f"facebook has no image posts either: {facebook}"
+    assert asked == ["video"], asked
+
+    # Instagram, unchanged: the single image post and the carousel both still work,
+    # including through the short host, or this fix would have broken the feature it
+    # is protecting.
+    image_post = {"formats": [], "thumbnails": [{"id": "12", "url": "https://x/a.jpg"}]}
+    no_video = "ERROR: [Instagram] x: There is no video in this post"
+    for url in ("https://www.instagram.com/p/DbvWPFQxPkI/", "https://instagr.am/p/DbvWPFQxPkI/"):
+        with temp_workspace() as workspace:
+            photo, asked = _attempt_download(
+                url, workspace, info=image_post, video_error=no_video, image="best.jpg",
+            )
+        assert isinstance(photo, Media), f"{url}: an Instagram image post must still be sent: {photo}"
+        assert photo.path.name == "best.jpg" and not photo.slides, photo
+        assert asked == ["video", "probe", "thumbnails"], asked
+
+    carousel = {"formats": [],
+                "entries": [{"formats": [], "thumbnails": [{"id": "12", "url": "https://x/a.jpg"}]}
+                            for _ in range(10)]}
+    with temp_workspace() as workspace:
+        album, asked = _attempt_download(
+            "https://www.instagram.com/p/DbcsX-BlkZX/?img_index=9", workspace,
+            info=carousel, video_error=no_video, slides=10,
+        )
+    assert isinstance(album, Media), f"an Instagram carousel must still be an album: {album}"
+    assert len(album.slides) == 10 and album.slide_total == 10, album
+    assert asked == ["video", "probe", "slides"], asked
+    print("ok  only Instagram reaches the image fallback; everything else keeps its error")
 
 
 def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
@@ -3151,6 +3441,7 @@ def _self_check() -> None:
     _check_rejected_ledger()
     _check_failure_replies()
     _check_failed_extraction_keeps_its_error()
+    _check_only_instagram_can_be_an_image_post()
     _check_unattempted_links_are_recorded()
     _check_album_delivery()
     _check_failure_path()
