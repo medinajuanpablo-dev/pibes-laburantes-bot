@@ -151,9 +151,15 @@ machine. **They are not a Windows run.**
   place a friend gets stuck, and the reply says it in Spanish. If it turns out to be worse than one
   extra step, the fix that does force a download is a release asset
   (`…/releases/latest/download/instalar-bot.cmd`), at the cost of an upload on every change.
-- **Whether Windows lets a downloaded `.cmd` run**, and what the warning says. Expected: the
-  mark-of-the-web dialog, *Más información → Ejecutar de todas formas*. A `.cmd` needs no exec bit,
-  which is the entire reason this path exists, but nobody has seen the dialog.
+- **Whether Windows lets a downloaded `.cmd` run**, and **which** dialog it shows. A `.cmd` needs no
+  exec bit, which is the entire reason this path exists, but nobody here has seen the prompt. There
+  are two candidates and the copy names the second one: the Attachment Manager's *"¿Desea ejecutar
+  este archivo?"* with a plain **Ejecutar** button, or SmartScreen's *"Windows protegió su PC"* with
+  **Más información → Ejecutar de todas formas**. If it is the first, the reply's *"te va a preguntar
+  si estás seguro"* still lands and only the button names are wrong. **Report which one it was** — one
+  word of copy in `bot.py` and one in `EMPEZAR-ACA.md` depend on it. Worth watching for a third
+  possibility on a clean Windows 11: Smart App Control blocking it outright rather than asking, which
+  no wording can rescue.
 - **`System32\curl.exe` and `System32\tar.exe` existing on that machine.** Both shipped in Windows 10
   build 17063 / 1803, so anything current has them; Windows 8.1 and older have neither, and the
   script prints one Spanish line pointing at the git path instead of assuming. Both are called by
