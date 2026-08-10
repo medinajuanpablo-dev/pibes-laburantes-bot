@@ -111,3 +111,55 @@ polling counter, never my curl.**
 - *"slice 0 is the smallest of the three"* -- false; it forced a rewrite of the YouTube signature row.
 - *"one fix closes both the lost diagnosis and the 38 requests"* -- false; only the diagnosis.
 - My rate-limit warning named Facebook; what actually failed was **YouTube, HTTP 403**.
+
+## AUTO rounds 3-7 — what 12 hours of unattended production actually showed
+
+I hosted the bot from 2026-08-09 23:27 to 2026-08-10 11:14. **Nobody was watching it and it did not
+need anybody.**
+
+| | |
+|---|---|
+| deliveries | **14** -- 11 video, 3 photo |
+| real failures | **0** |
+| the 3 ERROR lines in the log | all `There is no video in this post`: yt-dlp's logger on **image posts the fallback then delivered correctly**. Not failures. |
+| insults answered | 2, both matching cleanly on `['bot', 'estupido']` -- no fuzzy edge case in the field |
+| **site breakdown** | **instagram 14 · youtube 0 · facebook 0** |
+
+### The decision-relevant fact of the whole run
+**This is an Instagram group.** Fourteen of fourteen. In 12 hours nobody pasted a YouTube or a
+Facebook link at all. Every hour spent on YouTube last night -- the format string, the bot-check
+signature, the poster-frame defect -- protects a path this group did not use once. It was still worth
+fixing (a poster frame instead of a video is a silent lie), but **it changes the priority of any
+further YouTube work to near zero**, and it says the next capability question is "what else does
+Instagram do that we do not handle", not "what other site should we add".
+
+Recorded here rather than acted on: the ledger's `UnsupportedHost` class is what will answer the
+second half, and it has no data yet.
+
+### Landings in these rounds
+| What | Verdict | Live layer |
+|---|---|---|
+| Named failure messages + the de-ANSI'd ledger | APPROVED | RUN -- drove `_deliver` on the real restricted reel; verified the exact Spanish for all six signatures |
+| The ledger's three blind spots (YouTube diagnosis, unsupported hosts, `message.entities`) | APPROVED | RUN -- a dead YouTube link now records yt-dlp's own error |
+| The baton pass fix (`--take-over`) | APPROVED | **RUN -- the two-instance experiment, the whole point.** Incumbent yields, taker survives, exactly one process left. The old build left zero. |
+| Poster frame + the insult reply | APPROVED, **then a false positive I shipped** | RUN. See below. |
+| `/instalar` | APPROVED | RUN -- all three variants sent to the real group, `&&` renders literally, token absent |
+| `/instalar` shrunk 22 lines -> 5 | APPROVED | RUN -- re-sent live |
+
+### My own errors in these rounds
+1. **I merged a false positive into production and hosted it for ~40 minutes.** `"que estupido, bro"`
+   -- an ordinary sentence -- fired. **My 26-phrase adversarial corpus contained no local slang.** The
+   agent caught it after its own slice was green, and the reason is instructive: difflib scores `bro`
+   and `vot` **identically** against `bot`, so no threshold can separate them. The fix is an
+   enumerated exclusion list, not a number.
+2. **I read `getUpdates -> ok` as "nobody is polling".** It is not: my own probe terminates the
+   running bot's poll and wins. Liveness is `pgrep` plus the bot's own counter, never my curl.
+3. **I ordered a file attachment for `/instalar` and the agent refused, correctly.** A double-clicked
+   `.command` needs the exec bit **and** no quarantine; a download has neither, and right-click ->
+   Open cannot add an exec bit. Same wall for a GitHub link -- confirmed against browser-downloaded
+   files already on this Mac. Windows is the exception because a `.cmd` needs no exec bit.
+4. **I overstated the install feature at ~540 lines; it was 463**, and the line ranges I cited in the
+   order were wrong by ~295 lines.
+5. **I chained a destructive cleanup behind a check twice**, and both times the check failed and the
+   cleanup ran anyway. The second time it removed a worktree holding an agent's uncommitted docs --
+   which I read before touching, and which survived. Luck, not process, twice.
