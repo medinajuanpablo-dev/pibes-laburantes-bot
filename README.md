@@ -40,6 +40,8 @@ Telegram update
      │   └─ _deliver(url)
      │        ├─ temp_workspace()          mkdtemp, removed in a finally
      │        ├─ download_into()           yt-dlp, format MEDIA_FORMAT, merged by ffmpeg if needed
+     │        │     ├─ is_live_stream()         match_filter, so a live stream is refused
+     │        │     │                           before a byte is written — §4.13
      │        │     └─ on DownloadError → _image_fallback()   is the post merely video-less?
      │        │            ├─ has_image_posts(url)     Instagram, or no fallback at all
      │        │            ├─ is_image_post()          no formats + thumbnails + not a carousel
@@ -52,7 +54,8 @@ Telegram update
      │        │     │        → _send_album()   reply_media_group, open files, 2-10 slides
      │        │     └─ "link" → oversize_reply()  a Spanish message carrying the direct URL
      │        ├─ record_rejection()        anything that was not delivered lands in rejected.jsonl
-     │        └─ except → _apologise()     failure_reply() names the cause when it can, else
+     │        └─ except → _apologise()     failure_reply() names the cause when it can — the
+     │                                     exception's CLASS first, then its text, else
      │                                     FAILURE_REPLY; own timeouts, never re-raises
      │
      └─ _handle_insult(message)  the one thing it answers that is not a link
@@ -1046,6 +1049,22 @@ extractor's diagnosis survives, and the row is keyed on it: `[youtube]` pins it 
 The cost that came with it is gone too, and later than the row: a dead YouTube link used to burn
 ~38 thumbnail requests before the fallback could tell they were worthless, and since the fallback
 declines on the host it now makes no request at all (§4.8).
+
+**One reply is not in that table at all, and must never be: the live stream.** `failure_reply()` asks
+the exception **class** before it looks at any text, and `LiveStreamError` returns
+*ese link es una transmisión en vivo, no puedo bajarla hasta que termine* (§4.13). Every row in the
+table is keyed on a string **that came from the site**; this refusal never asks the site anything —
+the bot decides it off the info dict, before a byte is written — so the only string available to key
+a row on would be **the bot's own sentence**, which is exactly the defect the deleted-or-private row
+was fixed of below. The bot's words are byte-identical for every link that reaches them, so such a
+row would tell the ledger and the group nothing the class had not already said. The discrimination is
+therefore the exception, the same one `is_transport_failure` makes: **the class, never the message.**
+
+It does **not** hedge, for the same reason the bot-check row does not — `is_live` is the site stating
+a fact about its own post. Its actionable half, *hasta que termine*, is true rather than kind: once
+the stream ends the same link becomes an ordinary bounded video and downloads normally. The reply is
+picked before the single protected send, so this adds **no** fifth swallow site; the ledger records it
+as its own error class, `LiveStreamError`, with the raw detail.
 
 **These strings are upstream prose and they will drift.** The design makes drift fail safe: a
 reworded message matches no row and the group gets the generic apology, which is where it started.

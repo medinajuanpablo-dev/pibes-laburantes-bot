@@ -335,6 +335,22 @@ ALBUM_MAX_ITEMS = int(telegram.constants.MediaGroupLimit.MAX_MEDIA_LENGTH)
 
 FAILURE_REPLY = "no pude bajar ese link"
 
+# What somebody who pasted a live stream is told. NOT a FAILURE_SIGNATURES row, and
+# that is the whole point: every row down there is keyed on a string that came from
+# the site, and this refusal never asks the site anything -- the bot decides it, off
+# the info dict, before a byte is written. Keying a row on the bot's own sentence is
+# the exact defect the YouTube row was fixed of (README.md §5.2), so this reply is
+# chosen from the exception CLASS instead, the same discrimination is_transport_failure
+# already uses: the exception, never the message.
+#
+# It does not hedge, for the same reason the bot-check row does not: the signature is
+# not ambiguous. `is_live` is the site stating a fact about its own post.
+#
+# "hasta que termine" is the actionable half, and it is true rather than kind: once
+# the stream ends the same link becomes an ordinary bounded video and downloads
+# normally (measured -- that is the was_live row in README.md §4.13).
+LIVE_STREAM_REPLY = "ese link es una transmisión en vivo, no puedo bajarla hasta que termine"
+
 # The failures the bot can NAME, and the Spanish line each one earns. Data: the
 # matcher is failure_reply() and never needs touching to add a row.
 #
@@ -1702,20 +1718,35 @@ def oversize_reply(size_bytes: int, link: str) -> str:
     return f"pesa {megabytes:.0f} MB y Telegram no me deja subirlo. Te lo dejo acá: {link}"
 
 
-def failure_reply(detail: str) -> str:
-    """The Spanish line the group gets for a failure whose text is `detail`.
+def failure_reply(detail: str, exc: BaseException | None = None) -> str:
+    """The Spanish line the group gets for a failure: its CLASS first, then its text.
 
-    The logic half of FAILURE_SIGNATURES, and all of it: find the first row whose
-    markers are all present, else fall back to FAILURE_REPLY. Adding a failure the
+    THE CLASS IS ASKED FIRST, AND IT IS NOT A STRING MATCH. A live stream is the one
+    refusal the bot decides itself rather than reading off the site, so there is no
+    site string to key it on -- only the bot's own sentence, and keying a row on that
+    is the exact defect the YouTube row was fixed of (README.md §5.2): the bot's words
+    are byte-identical for every link that reaches them, so the row tells the ledger
+    and the group nothing the class did not already say, and it silently swallows
+    whatever the site really said. So the discrimination is the exception, the same one
+    is_transport_failure makes, and `detail` is not consulted for it at all.
+
+    The rest is the logic half of FAILURE_SIGNATURES, and all of it: find the first row
+    whose markers are all present, else fall back to FAILURE_REPLY. Adding a failure the
     bot can name is adding a row up there; nothing here changes.
 
     Casefolded so a wording that only differs in capitals still matches, and the
     escapes come off first so a coloured message classifies exactly like a clean one
     -- the ledger already learned that lesson the expensive way.
 
+    `exc` defaults to None so every caller that only has a string still works, and so
+    that a future failure with a class of its own is one isinstance away rather than a
+    signature change.
+
     Unrecognised is not a guess. Anything this does not recognise is still
     "no pude bajar ese link", the same sentence it has always been.
     """
+    if isinstance(exc, LiveStreamError):
+        return LIVE_STREAM_REPLY
     haystack = strip_ansi(detail).casefold()
     for markers, reply in FAILURE_SIGNATURES:
         if all(marker in haystack for marker in markers):
@@ -2397,7 +2428,10 @@ async def _deliver(message: telegram.Message, url: str) -> None:
         # The ledger gets the RAW text whatever the group is told: the friendly line
         # is for the chat, the detail is the owner's diagnosis and must not be lost.
         record_rejection(message, url, type(exc).__name__, detail)
-        await _apologise(message, detail)
+        # The exception travels, not just its text: a live-stream refusal is chosen
+        # from the class, because the bot wrote that failure's words itself and a
+        # string match on them would be a match on the bot's own sentence.
+        await _apologise(message, detail, exc)
 
 
 async def _reply_text(
@@ -2421,14 +2455,21 @@ async def _reply_text(
     )
 
 
-async def _apologise(message: telegram.Message, detail: str = "") -> None:
-    """Tell the group the link failed, naming the cause when `detail` allows it.
+async def _apologise(
+    message: telegram.Message, detail: str = "", exc: BaseException | None = None
+) -> None:
+    """Tell the group the link failed, naming the cause when the failure allows it.
 
     `detail` is the failure's own text and is used only to pick the sentence --
     nothing from it is ever quoted to the group, which would put a URL, an extractor
     name or a stack fragment in front of people who cannot use any of them. With no
     detail, or a detail nothing recognises, this is the generic apology it has always
     been. See FAILURE_SIGNATURES for why some of those sentences hedge.
+
+    `exc` is the failure itself, and it is passed rather than pre-resolved into a
+    string so that the one refusal the bot decides for itself -- a live stream -- is
+    chosen from its CLASS and never from prose. Still ONE protected send: the sentence
+    is picked before the call, not by a second call with its own swallow.
 
     This call may not raise, ever.
 
@@ -2445,7 +2486,7 @@ async def _apologise(message: telegram.Message, detail: str = "") -> None:
     honest destination left.
     """
     try:
-        await _reply_text(message, failure_reply(detail))
+        await _reply_text(message, failure_reply(detail, exc))
     except Exception:
         log.exception("could not deliver the failure reply either; the group got nothing")
 
@@ -3284,6 +3325,39 @@ def _check_failure_replies() -> None:
     assert failure_reply(straddled) == replies["instagram, audience-restricted"], failure_reply(straddled)
     print("ok  a failure the bot can name gets its own Spanish line")
 
+    # The live stream: chosen from the CLASS, and provably not from the message.
+    live_detail = ("https://www.youtube.com/watch?v=X4VbdwhkE10 is a live stream; "
+                   "refused before downloading any of it")
+    assert failure_reply(live_detail, LiveStreamError(live_detail)) == LIVE_STREAM_REPLY
+    # THE ASSERT THAT PINS "class, not string": the identical text with no exception,
+    # and with the wrong class, must NOT get the live line. A FAILURE_SIGNATURES row
+    # keyed on the bot's own sentence passes the line above and fails both of these.
+    assert failure_reply(live_detail) == FAILURE_REPLY, \
+        "the live line must come from the class, never from the bot's own words"
+    assert failure_reply(live_detail, ExtractionError(live_detail)) == FAILURE_REPLY, \
+        "a generic extraction failure is not a live stream, whatever its text says"
+    # And the mirror: the class wins even when the text looks like another row, which
+    # is what makes it a class decision rather than a tie-break.
+    assert failure_reply(measured["youtube, unavailable (A)"],
+                         LiveStreamError("x")) == LIVE_STREAM_REPLY
+    # The subclass must not drag its parent along: ExtractionError is raised for every
+    # ordinary bounce and must keep falling through to the table.
+    assert failure_reply(measured["instagram, no such post"],
+                         ExtractionError("x")) == replies["instagram, no such post"]
+    # No row may collide with it, now or after a future row is added.
+    assert LIVE_STREAM_REPLY not in named, "the live line must not duplicate a measured row"
+    assert not any(LIVE_STREAM_REPLY == reply for _markers, reply in FAILURE_SIGNATURES), \
+        "a live stream is decided by the bot and must never become a signature row"
+    # A friend reads it: same bar as every row in the table above.
+    assert LIVE_STREAM_REPLY == LIVE_STREAM_REPLY.lower(), "the bot does not shout"
+    assert len(LIVE_STREAM_REPLY) <= 120 and "\n" not in LIVE_STREAM_REPLY, LIVE_STREAM_REPLY
+    assert not any(char.isdigit() for char in LIVE_STREAM_REPLY), "no codes in the chat"
+    for jargon in ("error", "http", "yt-dlp", "url", "extract", "live_status", "stream", "vivos"):
+        assert jargon not in LIVE_STREAM_REPLY, f"{jargon!r} means nothing to the group"
+    # It does NOT hedge, and it must not: is_live is the site stating a fact.
+    assert "puede que" not in LIVE_STREAM_REPLY, "this signature is not ambiguous"
+    print("ok  a live stream gets its own line, chosen from the class and not the text")
+
     # End to end through _deliver: the group hears the named line, and the ledger
     # still gets the raw text. A wiring that drops the detail on the way to the
     # apology passes every assert above and fails here.
@@ -3319,6 +3393,39 @@ def _check_failure_replies() -> None:
     assert replies["instagram, audience-restricted"] not in written[0]["detail"], \
         "the ledger records the raw failure, not the sentence the group was told"
     print("ok  _deliver tells the group the cause and still records the raw detail")
+
+    # The same road for the live stream, because the class has to SURVIVE the trip:
+    # _deliver -> _apologise -> failure_reply. A wiring that resolves the sentence from
+    # the string before the exception gets there passes every assert above and fails
+    # here, and so does one that forgets to pass `exc` along.
+    live_url = "https://www.youtube.com/watch?v=X4VbdwhkE10"
+
+    def _live_download(_url: str, _target_dir: Path) -> Media:
+        raise LiveStreamError(f"{live_url} is a live stream; refused before downloading any of it")
+
+    real_download, real_ledger = globals()["download_into"], globals()["REJECTED_LEDGER"]
+    globals()["download_into"] = _live_download
+    with temp_workspace() as workspace:
+        globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+        try:
+            message = RecordingMessage()
+            with _capture_log(logging.ERROR):
+                asyncio.run(_deliver(message, live_url))
+            written = read_rejections(globals()["REJECTED_LEDGER"])
+        finally:
+            globals()["download_into"] = real_download
+            globals()["REJECTED_LEDGER"] = real_ledger
+
+    assert message.said == [LIVE_STREAM_REPLY], message.said
+    assert FAILURE_REPLY not in message.said, "a live stream is a named refusal, not a mystery"
+    # Its own error class in the ledger, with the real detail -- so `--rejected` can
+    # show how often this happens instead of burying it in the generic bounce pile.
+    assert len(written) == 1, written
+    assert written[0]["error"] == "LiveStreamError", written
+    assert live_url in written[0]["detail"], written
+    assert LIVE_STREAM_REPLY not in written[0]["detail"], \
+        "the ledger records the raw refusal, not the sentence the group was told"
+    print("ok  a live stream reaches the group as its own line and the ledger as its own class")
 
 
 @contextmanager
