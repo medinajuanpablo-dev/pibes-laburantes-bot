@@ -81,6 +81,7 @@ token.** That is what makes the self-check possible.
 | `video_kwargs(media)` | `supports_streaming` plus width/height/duration **when known**, never zeros |
 | `telegram_renders_inline(container, codec)` | mp4 container and not AV1 |
 | `is_image_post(info)` | the post has **no** video formats, **has** thumbnails, and is not a carousel |
+| `is_live_stream(info)` | the link is a stream happening **now**, so it has no end — `is_live` or `live_status`, never `was_live` — §4.13 |
 | `carousel_slides(info)` | the entries of an all-image carousel of 2+ slides, else `[]` — §4.10 |
 | `delivery_kind(media)` | `album` when it carries slides, else `media_kind` |
 | `delivered_files(media)` | every file this will put in the chat: the slides, or the one file |
@@ -781,6 +782,51 @@ recomputable from the words.
 agent imagining how this group types. That is the honest status of the numbers above: they
 separate two invented lists cleanly, and the first real false positive is worth more than all of
 them.
+
+### 4.13 A live stream has no end, and it used to eat the bot
+
+A link to a stream that is happening **now** is the only input that does not fail and does not
+succeed — it downloads forever. Measured 2026-08-10 by driving the then-unguarded `download_into`
+against `youtube.com/watch?v=X4VbdwhkE10` (a permanent lofi radio stream) in a child process with a
+hard 20 s `SIGKILL`:
+
+| | |
+|---|---|
+| exited on its own | **no** — killed at 20 s |
+| bytes on disk | 2,097,152 in `X4VbdwhkE10.mp4.part` |
+| growth | monotonic, ~104 kB/s = **~6.3 MB/min = ~375 MB/h** |
+
+That is an audio-dominant stream, so it is the *cheap* case. Mechanism: `downloader/hls.py`'s
+`can_download` yields `not is_live`, so the native downloader refuses and `downloader/__init__.py`
+routes a live stream to `FFmpegFD`, which writes until something stops it.
+
+**The unbounded file is not the worst half.** `temp_workspace`'s cleanup is a `finally` that only
+runs when `download_into` **returns**, and on a live link it never returns — so the growing `.part`
+is never cleaned while the process lives. And because PTB processes updates sequentially, that one
+message **is the entire bot** until somebody kills it. One pasted link, on a friend's laptop, with
+no way for them to know why.
+
+**The three rows that define the guard**, measured with `--simulate` on 2026-08-10, yt-dlp 2026.7.4:
+
+| URL | `is_live` | `live_status` | `was_live` | `duration` | verdict |
+|---|---|---|---|---|---|
+| `watch?v=X4VbdwhkE10` (live now) | `True` | `is_live` | `False` | `None` | **refused** |
+| `watch?v=jNQXAC9IVRw` (ordinary) | `False` | `not_live` | `False` | 19 | accepted |
+| `watch?v=zo5oewEQbsE` (**finished** stream) | `False` | `was_live` | **`True`** | 1146 | accepted |
+
+**`was_live` is `True` for exactly the case that must NOT be refused**, which is the one way this
+feature silently breaks. A finished stream is an ordinary bounded video — that one selects `136+140`
+at 178 MB under `MEDIA_FORMAT`, so it leaves as the oversize link reply (§4.4). A guard keyed on
+`was_live` rejects every stream replay the group pastes, and no check that only tries a live URL
+would ever notice. `is_live_stream()` reads `is_live` and `live_status` and never `was_live`.
+
+**A size or duration ceiling is not an alternative.** On the live row `duration`, `filesize` and
+`filesize_approx` are **all `None`**, on the info dict *and* on the selected format — so a ceiling
+cannot fire on a live stream at all, and it would false-positive on long ordinary videos.
+
+**Nothing in format selection would have stopped this.** `MEDIA_FORMAT` does select a live format
+(`95`, `m3u8_native`, `avc1.4D401F` + `mp4a.40.2`, height 720, format-level `is_live=True`, no
+filesize), so the guard cannot live there — it has to answer before selection runs at all.
 
 ---
 

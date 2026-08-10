@@ -726,6 +726,54 @@ def ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def is_live_stream(info: dict | None) -> bool:
+    """Whether this link is a stream happening RIGHT NOW, so it has no end to download.
+
+    The one refusal this bot decides for ITSELF. Every other failure it names is the
+    site's answer to a question; this is a fact the site states about its own post,
+    and the bot acts on it before a byte moves.
+
+    Two fields, ORed, and nothing else. Measured 2026-08-10 with `--simulate` against
+    yt-dlp 2026.7.4, the three rows that matter:
+
+        watch?v=X4VbdwhkE10  live now         is_live=True   live_status=is_live
+        watch?v=jNQXAC9IVRw  ordinary video   is_live=False   live_status=not_live
+        watch?v=zo5oewEQbsE  FINISHED stream  is_live=False   live_status=was_live
+
+    `was_live` IS DELIBERATELY NOT READ, and that is this function's whole trap: it is
+    True on the third row -- a finished stream, which is an ordinary bounded video and
+    must still be delivered (that one measures 178 MB under MEDIA_FORMAT, so it leaves
+    as the oversize link reply). A guard keyed on `was_live` silently refuses every
+    stream replay the group pastes, and no check that only tries a live URL would ever
+    notice.
+
+    A SIZE OR DURATION CEILING CANNOT DO THIS JOB -- do not reach for one later. On the
+    live row `duration`, `filesize` and `filesize_approx` are all None, both on the info
+    dict and on the format MEDIA_FORMAT selects, so a ceiling cannot fire on a live
+    stream at all; and it would false-positive on any long ordinary video.
+
+    Both fields rather than one because they come from different layers: `is_live` is
+    the extractor's own flag, `live_status` is yt-dlp's normalisation of it. Either
+    alone is a single point of drift for a refusal that has to be right.
+
+    False on None and on {}: an info dict that says nothing is not a live stream. That
+    is not defensiveness -- yt-dlp also runs the filter over playlist entries, which
+    arrive with almost nothing in them.
+
+    ponytail: the two live_status values NOT refused are `is_upcoming` (a premiere that
+    has not started, so there is nothing to download yet) and `post_live` (a stream that
+    ENDED and is still being processed, which is bounded by definition and may well
+    download). Neither has been measured here, and the bot has no separate sentence for
+    either, so both fall through to whatever yt-dlp does with them today rather than
+    being guessed at. Upgrade path if one shows up in the ledger: `is_upcoming` earns its
+    own Spanish line ("todavía no empezó"), and `post_live` earns a measurement first --
+    it is the one of the two that might just work.
+    """
+    if not info:
+        return False
+    return bool(info.get("is_live")) or info.get("live_status") == "is_live"
+
+
 def _ydl_options(target_dir: Path) -> dict:
     options = {
         "format": MEDIA_FORMAT,
@@ -2758,6 +2806,28 @@ def _check_pure_helpers() -> None:
     assert is_image_post({"formats": [], "thumbnails": thumbs, "duration": None, "title": "Video by x"})
     assert not is_image_post({"formats": [{"format_id": "1"}], "duration": None, "thumbnails": thumbs})
     print("ok  is_image_post")
+
+    # is_live_stream: the three rows of the measured table, and the trap is row three.
+    # Field values are the real ones from `--simulate` on 2026-08-10, not invented.
+    assert is_live_stream({"is_live": True, "live_status": "is_live", "was_live": False,
+                           "duration": None}), "a stream happening now must be refused"
+    assert not is_live_stream({"is_live": False, "live_status": "not_live", "was_live": False,
+                               "duration": 19}), "an ordinary video must be downloaded"
+    # THE ONE THAT SILENTLY BREAKS THIS FEATURE. A finished stream reports was_live=True
+    # and is an ordinary bounded video -- 1146 s, 178 MB. Refusing it would reject every
+    # stream replay the group pastes, and no live URL would ever reveal it.
+    assert not is_live_stream({"is_live": False, "live_status": "was_live", "was_live": True,
+                               "duration": 1146}), "a FINISHED stream is an ordinary video"
+    # Either field alone is enough, because either one alone could drift.
+    assert is_live_stream({"is_live": True}), "the extractor's own flag is enough"
+    assert is_live_stream({"live_status": "is_live"}), "yt-dlp's normalisation is enough"
+    # Nothing said is not a live stream: yt-dlp runs the filter over playlist entries too.
+    assert not is_live_stream({}), "an empty info dict is not a live stream"
+    assert not is_live_stream(None), "no info at all is not a live stream"
+    # The values deliberately left alone, pinned so a later widening is a decision.
+    assert not is_live_stream({"live_status": "is_upcoming"}), "a premiere is not refused here"
+    assert not is_live_stream({"live_status": "post_live"}), "an ended stream is bounded"
+    print("ok  is_live_stream")
 
     # The album's bounds are Telegram's, taken from PTB's enum. If a library bump
     # ever moves them, this fails loudly instead of the bot guessing.
