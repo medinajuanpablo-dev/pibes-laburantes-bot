@@ -444,6 +444,10 @@ is sized against the slow end.
 | `TEXT_REPLY_TIMEOUT` | 60 s | the failure reply gets its own budget — see §4.6 |
 | `SOCKET_TIMEOUT` | 20 s | yt-dlp's network knob. Note `timeout(1)` does not exist on macOS; this is the real one. |
 
+`TRANSPORT_RETRY_PAUSE` is deliberately not in this table: it is not a timeout but the gap between
+the two attempts a transport failure buys, and it multiplies `SOCKET_TIMEOUT` rather than competing
+with it. §5.3 — read it before changing either number.
+
 ### 4.6 The failure path is the one that bites
 
 In production, an upload timed out **and the apology timed out too**, escaped `_deliver`, and the
@@ -931,6 +935,79 @@ reworded message matches no row and the group gets the generic apology, which is
 A row that stops firing shows up in the ledger, which keeps the raw text — copy the new sentence,
 add a row. Do not loosen a marker to "catch more": a loose marker firing on the wrong failure is
 the only outcome worse than the generic apology.
+
+### 5.3 A blip is not a bounce — the one retry
+
+Two good links bounced three minutes apart on 2026-08-10, and the ledger named the cause without
+anybody guessing:
+
+```
+ERROR: [Instagram] …: Unable to download webpage: Failed to perform,
+curl: (28) Resolving timed out after 20001 milliseconds
+```
+
+`curl: (28) Resolving timed out` is **DNS failing on the machine hosting the bot** — not Instagram,
+not the links, which both extracted fine minutes later. On a bot that lives on whichever friend's
+home wifi is up, this is the most likely recurring failure there is, and it is the one where the
+right answer is *try again* rather than *explain*.
+
+**None of yt-dlp's own retry knobs reaches it, and that was measured before anything was written.**
+Method: a real Instagram extraction pointed at a local listener that accepts the connection and
+closes it — a transport failure at exactly the call site a DNS timeout fails at
+(`_request_webpage`, during metadata extraction), with nothing sent to Instagram at all. Every
+configuration made **exactly one** transport attempt:
+
+| yt-dlp options | Transport attempts |
+|---|---|
+| as shipped (`retries: 3`) | 1 |
+| `+ extractor_retries: 3` (its own default anyway) | 1 |
+| `+ extractor_retries: 10` | 1 |
+| `+ retries: 10, fragment_retries: 10` | 1 |
+| all three at 10 | 1 |
+
+The source says why, and it is worth knowing because the names are misleading:
+
+- **`retries`** is the **media file** downloader's loop — `downloader/http.py`, one call site. It
+  covers the bytes of the video, after extraction has already succeeded.
+- **`fragment_retries`** belongs to the fragment downloaders (DASH, HLS, ISM, external). Same half
+  of the process, smaller unit.
+- **`extractor_retries`** only exists where an extractor explicitly wraps a section in
+  `RetryManager` (`extractor/common.py`). Nine extractors do — YouTube and TikTok among them —
+  and **Instagram is not one of them**, so setting it changes nothing whatsoever for the site this
+  group actually pastes. It is also *documented* as being for "known errors", not for transport.
+
+So the retry is the bot's own, it lives in `download_into`, and it is **one** extra attempt after
+`TRANSPORT_RETRY_PAUSE`. Not a loop, no backoff, no jitter, no library: the evidence is a blip that
+cleared inside three minutes, so a second attempt is either enough or it was never a blip.
+
+**The discrimination is the exception, not the message.** yt-dlp hangs the original failure on the
+`DownloadError` it raises (`YoutubeDL.trouble` copies `sys.exc_info()` onto it), and anything below
+the HTTP layer arrives there as `networking.exceptions.TransportError` — verified against
+yt-dlp 2026.7.4 on 2026-08-10. `HTTPError` is a *sibling* of that class, not a subclass, so a 404,
+a 403 or a rate-limit page is an **answer** and is never retried; neither is an `ExtractorError`
+such as "this post is private". `is_transport_failure()` is the whole rule.
+
+**A transport failure also skips the image fallback**, which is not a saving but the only correct
+answer: that probe's job is to ask the site what kind of post this is, and the site is precisely
+what could not be reached.
+
+**What a real outage costs the group**, derived from the measured attempt count times
+`SOCKET_TIMEOUT` (20 s — the production record says "20001 milliseconds", which is that constant):
+
+| Link | Before | Now |
+|---|---|---|
+| Instagram | ~40 s — the failed extraction, then the image fallback's probe timing out too | ~43 s — two real attempts, plus the 3 s pause |
+| YouTube, Facebook | ~20 s — one attempt; the host guard already skipped the fallback | ~43 s |
+
+On Instagram the change is therefore almost free: it spends on a second real attempt what used to
+be spent on a probe that could not have worked. Off Instagram it roughly doubles the wait for the
+apology, and that is the price of the link not being lost.
+
+**If the retry fails too, the ledger says so.** The record's `detail` opens with
+`yt-dlp could not download <url> (retried once):` and the extractor's own raw text follows it
+untouched, so `bot.py --rejected` tells "the network was down for two attempts" apart from a
+first-time failure without any record growing a field. Whoever is watching the terminal learns
+earlier — one `WARNING` line goes out between the attempts, while the link can still be saved.
 
 ---
 

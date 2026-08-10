@@ -21,6 +21,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
 | the insult the bot answers, its two corpora and both thresholds | `README.md` §4.12 ← read before touching `INSULT_WORDS` |
 | the Spanish line each named failure gets, and why three of them hedge | `README.md` §5.2 ← read before touching `FAILURE_SIGNATURES` |
+| why a failed link gets a second attempt, which yt-dlp knob does **not** reach it, and what a real outage costs the group in seconds | `README.md` §5.3 ← read before touching the retry, `TRANSPORT_RETRY_PAUSE` or `SOCKET_TIMEOUT` |
 | carousels, albums, `sendMediaGroup`'s limits | `README.md` §4.10 |
 | message entities, the UTF-16 offset trap, why `text_link` is refused | `README.md` §4.11 |
 | why something was *not* built | `README.md` §6 |
@@ -165,6 +166,19 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   transformed leak through, which is exactly the mutation the invariance assert catches and the other
   two do not. The two fakes must stay token-shaped and different from each other; both are asserted,
   because bait that is not shaped like the quarry arms nothing. `README.md` §2.2.
+- **No yt-dlp retry knob reaches a transport failure during metadata extraction, and all three were
+  measured saying so.** `retries` is the media downloader's loop (`downloader/http.py`),
+  `fragment_retries` the fragment downloaders', and `extractor_retries` only exists where an
+  extractor wraps a section in `RetryManager` — nine do and **Instagram is not one of them**. Set to
+  10 they still produce exactly one transport attempt (`README.md` §5.3 has the table and the
+  method). That is why the second attempt is the bot's own, and why "just set `extractor_retries`"
+  is the plausible-sounding fix that does nothing. The discrimination is the **exception**, never
+  the message: yt-dlp hangs the original on `DownloadError.exc_info`, transport failures arrive
+  there as `networking.exceptions.TransportError`, and `HTTPError` is that class's **sibling**, not
+  its subclass — so a 404 or a rate-limit page is an answer and is never retried. A transport
+  failure also never reaches the image fallback, because that probe asks the site a question and the
+  site is what could not be reached; that is what keeps the retry nearly free on Instagram, where
+  the probe used to burn a second `SOCKET_TIMEOUT` arriving at the same apology.
 - **`_publish_commands` is the fourth place in this file that swallows an exception**, and it is the
   only one that is not on the delivery path. A `post_init` callback that raises aborts
   `run_polling`, so a network blip while publishing a *menu* would leave a friend staring at a
@@ -274,7 +288,15 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   album slides picked by list order or delivered out of order · `ALBUM_MAX_ITEMS` not following
   `telegram.constants.MediaGroupLimit` · `strip_ansi` made a no-op or dropped from
   `rejection_record` · an `ANSI_ESCAPE` greedy enough to eat `[Instagram]` · `_apologise` ignoring
-  its detail, or `_deliver` not passing it · `failure_reply` matching with `any` instead of `all`,
+  its detail, or `_deliver` not passing it ·
+  `is_transport_failure` reading the `DownloadError` itself instead of what yt-dlp hung under it,
+  made constant in either direction, or widened to `HTTPError`/`ExtractorError` (that last one
+  retries every restricted post and dead video, and is invisible in production because the group
+  still gets the right apology — just twice as slowly, on every failure) · the retry not firing,
+  firing more than once, or firing with no pause · `TRANSPORT_RETRY_PAUSE` set to 0 · a transport
+  failure reaching the image fallback · the retry note dropped from the ledger's detail, written
+  onto a bounce that was never retried, or placed where it breaks `failure_reply`'s match ·
+  `failure_reply` matching with `any` instead of `all`,
   losing its casefold or its strip · an unrecognised failure returning anything but `FAILURE_REPLY`
   · one of the three hedged replies rewritten as a certainty · a `FAILURE_SIGNATURES` marker
   written with a capital (it can then never fire) · a row added that no measured signature reaches

@@ -34,6 +34,11 @@ from urllib.parse import urlparse
 import telegram
 import yt_dlp
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
+# The one class that says "the site was never reached" rather than "the site said
+# no". Imported by name so a yt-dlp release that moves it fails at startup, on the
+# host, in front of whoever just bumped the pin -- rather than on the failure path,
+# in front of the group. is_transport_failure is the only thing that reads it.
+from yt_dlp.networking.exceptions import TransportError
 
 log = logging.getLogger("the-bot")
 
@@ -83,6 +88,23 @@ MEDIA_FORMAT = (
 )
 
 SOCKET_TIMEOUT = 20  # seconds. Note: timeout(1) does not exist on macOS; this is the real knob.
+
+# The wait between the only two attempts a link ever gets. Not a backoff schedule and
+# not a loop: one retry is either enough or it was not a blip (README.md §5.3).
+#
+# Short on purpose, because the pause is not the whole gap -- the attempt that just
+# failed already spent up to SOCKET_TIMEOUT seconds failing, so the site gets ~23 s
+# of quiet, not 3. What it costs the group when the network is really down is in
+# README.md §5.3: the apology arrives at roughly 43 s instead of 20 s (40 s on
+# Instagram, where the image fallback used to pay for a second timeout of its own).
+TRANSPORT_RETRY_PAUSE = 3  # seconds
+
+# What the ledger says about a bounce that was already given its second chance. It
+# goes in the ExtractionError's own wrapper text, which is where the ledger's
+# `detail` starts, so `bot.py --rejected` shows it and no record grows a field.
+# The raw extractor text follows it untouched -- §5.1's rule is that the detail is
+# the failure's own words, and this is the bot's line ABOUT the attempt, in front.
+RETRIED_NOTE = " (retried once)"
 
 # python-telegram-bot's default media write timeout is 20 s, which no real video
 # meets. This value has to cover a whole upload, not one socket write: PTB reads the
@@ -686,24 +708,107 @@ def temp_workspace() -> Iterator[Path]:
         shutil.rmtree(target_dir, ignore_errors=True)
 
 
+def _extract(url: str, target_dir: Path) -> dict:
+    """One yt-dlp extraction-and-download of `url`. Raises DownloadError, like yt-dlp.
+
+    Its own function only because download_into calls it twice and the second call
+    must be identical to the first -- a fresh YoutubeDL over the same options, no
+    state carried over from the attempt that failed.
+    """
+    with yt_dlp.YoutubeDL(_ydl_options(target_dir)) as ydl:
+        return ydl.extract_info(url, download=True)
+
+
+def is_transport_failure(exc: BaseException) -> bool:
+    """Whether yt-dlp never REACHED the site, as opposed to the site answering it.
+
+    The discrimination is the exception, not the message, and it is available without
+    guessing: yt-dlp wraps everything in a DownloadError and hangs the original on
+    `exc_info` (YoutubeDL.trouble does it explicitly), and everything below the HTTP
+    layer -- a name that would not resolve, a reset connection, a timeout, a broken
+    proxy -- arrives there as a networking.exceptions.TransportError. Verified on
+    2026-08-10 against yt-dlp 2026.7.4 by driving a real extraction into a dead
+    listener: the DownloadError's exc_info[1] is the TransportError itself.
+    Instagram's live bounce says the same thing in words -- "(caused by
+    TransportError(...))" is in the ledger record -- but reading the class is exact
+    where reading its own prose is a string match waiting to drift.
+
+    An HTTP status is deliberately NOT one. HTTPError is a SIBLING of TransportError
+    in yt-dlp's hierarchy, not a subclass, so a 404, a 403 and a rate-limit page are
+    answers and are never retried. Neither is an ExtractorError: "this post is
+    private" is a fact about the post and asking twice only wastes the group's time
+    and the site's patience.
+
+    ponytail: the TransportError subclasses come along for the ride -- an expired
+    certificate and a misconfigured proxy are permanent and still cost one extra
+    attempt. Accepted: they are host misconfiguration rather than weather, nobody
+    here has ever seen one, and the cost of being wrong is one attempt, not a wrong
+    answer. Upgrade path if one ever shows up in the ledger: exclude
+    SSLError/ProxyError by name here, which is a one-line change with a check.
+    """
+    original = getattr(exc, "exc_info", None)
+    return isinstance(original[1] if original else None, TransportError)
+
+
+def _fallback_or_raise(
+    url: str, target_dir: Path, exc: yt_dlp.utils.DownloadError, retried: bool
+) -> Media:
+    """What a failed video extraction becomes: an image post, or the error itself.
+
+    A TRANSPORT failure skips the image fallback entirely, and that is not a saving,
+    it is the only correct answer: the fallback's whole job is to ask the site what
+    kind of post this is, and the site is exactly what could not be reached. Asking
+    anyway costs the group another SOCKET_TIMEOUT seconds of silence to arrive at the
+    same apology -- measured, it is why an Instagram bounce cost ~40 s and not ~20 s
+    before this branch existed.
+    """
+    if not is_transport_failure(exc):
+        # The video path is untouched: this runs only after it has already failed.
+        # "No video in this post" is not necessarily a failure -- an Instagram image
+        # post lands here and can still be delivered as a photo.
+        image = _image_fallback(url, target_dir)
+        if image is not None:
+            return image
+    note = RETRIED_NOTE if retried else ""
+    raise ExtractionError(f"yt-dlp could not download {url}{note}: {exc}") from exc
+
+
 def download_into(url: str, target_dir: Path) -> Media:
     """Download `url` into `target_dir`. Blocking. Nothing here knows about Telegram.
 
     Raises ExtractionError if the download produced no usable file. Split out from
     the context manager below so the Telegram layer can run it off the event loop
     while still holding the file open for the upload.
+
+    A TRANSPORT failure buys one more attempt and nothing more. Two good links
+    bounced on 2026-08-10 because the host's DNS timed out for a few minutes, and
+    none of yt-dlp's own retry knobs reaches that failure: `retries` is the media
+    downloader's loop (downloader/http.py), `fragment_retries` the fragment
+    downloaders', and `extractor_retries` only exists where an extractor wraps a
+    section in a RetryManager -- nine extractors do and Instagram is not one of them.
+    All three were measured at exactly one transport attempt (README.md §5.3), so
+    there was no knob to set instead of this.
+
+    Written as two attempts rather than a loop deliberately: the evidence is a blip
+    that cleared in under three minutes, so a second attempt is either enough or it
+    was not a blip, and a schedule of them would only make the group wait longer for
+    the same apology.
     """
     try:
-        with yt_dlp.YoutubeDL(_ydl_options(target_dir)) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except yt_dlp.utils.DownloadError as exc:
-        # The video path above is untouched: this runs only after it has already
-        # failed. "No video in this post" is not necessarily a failure -- an
-        # Instagram image post lands here and can still be delivered as a photo.
-        image = _image_fallback(url, target_dir)
-        if image is not None:
-            return image
-        raise ExtractionError(f"yt-dlp could not download {url}: {exc}") from exc
+        info = _extract(url, target_dir)
+    except yt_dlp.utils.DownloadError as first:
+        if not is_transport_failure(first):
+            return _fallback_or_raise(url, target_dir, first, retried=False)
+        # Not str(first) in the log: this one line stands in for the whole failure
+        # while it is still recoverable, and the record with the full text is only
+        # written if the second attempt fails too.
+        log.warning("could not reach the site for %s; trying once more in %ss", url, TRANSPORT_RETRY_PAUSE)
+        time.sleep(TRANSPORT_RETRY_PAUSE)
+        try:
+            info = _extract(url, target_dir)
+        except yt_dlp.utils.DownloadError as second:
+            return _fallback_or_raise(url, target_dir, second, retried=True)
+        log.info("the second attempt at %s worked; the first one was the network", url)
 
     path = _downloaded_path(info, target_dir)
     if path is None:
@@ -3152,6 +3257,188 @@ def _check_only_instagram_can_be_an_image_post() -> None:
     print("ok  only Instagram reaches the image fallback; everything else keeps its error")
 
 
+# The bounce that prompted all of this, copied out of the ledger record written at
+# 2026-08-10T14:30:38-03:00 rather than retyped from anybody's summary of it. Both
+# halves of this feature are keyed on this one failure: the exception underneath it
+# is what earns the retry, and the words in it are what the group hears when the
+# retry does not help either.
+DNS_FAILURE_ERROR = (
+    "ERROR: [Instagram] DbqocqEsbVs: Unable to download webpage: Failed to perform, "
+    "curl: (28) Resolving timed out after 20001 milliseconds. "
+    "See https://curl.se/libcurl/c/libcurl-errors.html first for more details. "
+    "(caused by TransportError('Failed to perform, curl: (28) Resolving timed out "
+    "after 20001 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html "
+    "first for more details.'))"
+)
+
+# What the site says when it HAS answered. Not a transport failure, not retryable,
+# and the reason the discrimination has to be the exception: this text and the one
+# above arrive as the same DownloadError class and differ only in what yt-dlp hung
+# on its exc_info.
+EMPTY_MEDIA_ERROR = "ERROR: [Instagram] AAAAAAAAAAA: Instagram sent an empty media response"
+
+
+def _download_error(text: str, cause: BaseException | None) -> yt_dlp.utils.DownloadError:
+    """The DownloadError yt-dlp really raises, with `cause` where yt-dlp puts it.
+
+    Raised and caught rather than constructed, because what makes a failure a
+    transport failure is the sys.exc_info() tuple YoutubeDL.trouble copies onto the
+    DownloadError -- a hand-built lookalike would let a mutation that reads the wrong
+    attribute pass. `cause=None` is the shape of a failure that was nobody's
+    exception, which must never be read as a transport one.
+    """
+    if cause is None:
+        return yt_dlp.utils.DownloadError(text)
+    try:
+        raise cause
+    except BaseException:  # noqa: BLE001 -- the point is to be inside the except block
+        return yt_dlp.utils.DownloadError(text, sys.exc_info())
+
+
+def _check_transport_failures_are_retried() -> None:
+    """A blip costs one more attempt; an answer costs none.
+
+    Everything here is driven by fakes that raise -- no network, and the retry's
+    pause is a fake clock, so the check does not spend TRANSPORT_RETRY_PAUSE seconds
+    proving that it waited. The clock is asserted on: a retry with no pause at all is
+    a different feature from the one this file documents.
+
+    The case that matters most is the second one. A retry that fires on a restricted
+    post or a dead video is invisible in production -- the group still gets the right
+    apology, just twice as slowly, on every single failure -- so it is asserted here
+    rather than left to be noticed.
+    """
+    curl_28 = "Failed to perform, curl: (28) Resolving timed out after 20001 milliseconds"
+
+    # The predicate on its own, against the four shapes it has to tell apart.
+    assert is_transport_failure(_download_error(DNS_FAILURE_ERROR, TransportError(curl_28)))
+    assert is_transport_failure(
+        _download_error("ERROR: incomplete read", yt_dlp.networking.exceptions.IncompleteRead(9, 99))
+    ), "a TransportError subclass is still the network, not an answer"
+    assert not is_transport_failure(
+        _download_error(EMPTY_MEDIA_ERROR, yt_dlp.utils.ExtractorError("empty media response"))
+    ), "the site answering is not a transport failure"
+    assert not is_transport_failure(_download_error(EMPTY_MEDIA_ERROR, None)), (
+        "a DownloadError carrying no original exception is not evidence of anything"
+    )
+    assert not is_transport_failure(RuntimeError("boom")), "only yt-dlp's own shape counts"
+    assert TRANSPORT_RETRY_PAUSE > 0, "a retry with no pause at all just asks the same dead socket twice"
+
+    def _run(outcomes: list[object], url: str) -> tuple[object, list[str], list[float], list[str]]:
+        """download_into over a yt-dlp that hands back `outcomes`, one per attempt.
+
+        Returns what came out (a Media or the error text), what was asked of yt-dlp,
+        how long the bot slept, and what it logged. An attempt beyond the end of
+        `outcomes` is an IndexError rather than a repeat: "not a loop" is part of the
+        contract. The log is captured rather than printed because every failure in
+        here is deliberate and a self-check that shouts about them teaches whoever
+        runs it to ignore its output.
+        """
+        asked: list[str] = []
+        pauses: list[float] = []
+        remaining = list(outcomes)
+
+        class _FakeYdl:
+            def __init__(self, options: dict) -> None:
+                self.options = options
+
+            def __enter__(self) -> "_FakeYdl":
+                return self
+
+            def __exit__(self, *_exc: object) -> bool:
+                return False
+
+            def extract_info(self, _url: str, download: bool = False) -> dict:
+                if not download:
+                    # The image fallback's probe. Reaching it at all is the thing
+                    # asserted on below, so it answers "not an image post" and lets
+                    # the original failure stand.
+                    asked.append("probe")
+                    return {"formats": [{"format_id": "0"}]}
+                asked.append("video")
+                outcome = remaining.pop(0)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                # An attempt that works leaves a file behind, like the real one.
+                Path(self.options["outtmpl"]).parent.joinpath("reel.mp4").write_bytes(b"\x00" * 2048)
+                return outcome
+
+        class _FakeYtDlp:
+            YoutubeDL = _FakeYdl
+            utils = yt_dlp.utils
+
+        class _FakeClock:
+            def sleep(self, seconds: float) -> None:
+                pauses.append(seconds)
+
+        real_yt_dlp, real_time = globals()["yt_dlp"], globals()["time"]
+        globals()["yt_dlp"], globals()["time"] = _FakeYtDlp, _FakeClock()
+        try:
+            with temp_workspace() as workspace, _capture_log(logging.WARNING) as logged:
+                try:
+                    return download_into(url, workspace), asked, pauses, logged
+                except ExtractionError as exc:
+                    return str(exc), asked, pauses, logged
+        finally:
+            globals()["yt_dlp"], globals()["time"] = real_yt_dlp, real_time
+
+    reel = "https://www.instagram.com/reel/DbqocqEsbVs/"
+
+    def blip() -> yt_dlp.utils.DownloadError:
+        """The 2026-08-10 bounce, as the exception the bot actually caught."""
+        return _download_error(DNS_FAILURE_ERROR, TransportError(curl_28))
+
+    # 1. The network is down and stays down: two attempts, one pause, and the record
+    #    says both -- that a retry happened, and what the failure really was.
+    failed, asked, pauses, logged = _run([blip(), blip()], reel)
+    assert isinstance(failed, str), f"a failure that survives the retry is still a failure: {failed}"
+    assert asked == ["video", "video"], f"one retry, not none and not a loop: {asked}"
+    assert pauses == [TRANSPORT_RETRY_PAUSE], f"exactly one pause, of the documented length: {pauses}"
+    assert RETRIED_NOTE in failed, f"the ledger cannot tell a retry happened: {failed}"
+    assert "Resolving timed out" in failed, f"the raw failure must survive the note: {failed}"
+    # Whoever is watching the window learns it too, and learns it while the link can
+    # still be saved -- the ledger record only exists once both attempts are spent.
+    assert len(logged) == 1 and reel in logged[0], logged
+
+    # 2. The blip clears. This is the whole point of the feature: the group gets its
+    #    video and never learns anything happened.
+    delivered, asked, pauses, _logged = _run([blip(), {}], reel)
+    assert isinstance(delivered, Media), f"the second attempt has to be able to succeed: {delivered}"
+    assert asked == ["video", "video"], asked
+    assert pauses == [TRANSPORT_RETRY_PAUSE], pauses
+
+    # 3. The site answered. One attempt, no pause, and the image fallback still gets
+    #    its turn -- on Instagram that branch is the difference between a photo post
+    #    being delivered and being apologised for.
+    answered, asked, pauses, logged = _run([_download_error(EMPTY_MEDIA_ERROR, None)], reel)
+    assert isinstance(answered, str), answered
+    assert asked == ["video", "probe"], f"an answer must not be retried, and must still fall back: {asked}"
+    assert pauses == [], f"nothing waited: {pauses}"
+    assert logged == [], f"nothing was retried, so nothing may say so: {logged}"
+    assert RETRIED_NOTE not in answered, f"nothing was retried, so nothing may say so: {answered}"
+
+    # 4. And the same for a failure the site raised as its own exception, which is
+    #    the shape every named row in FAILURE_SIGNATURES arrives in.
+    answered, asked, pauses, _logged = _run(
+        [_download_error(EMPTY_MEDIA_ERROR, yt_dlp.utils.ExtractorError("empty media response"))], reel
+    )
+    assert asked == ["video", "probe"], asked
+    assert pauses == [], pauses
+
+    # 5. Off Instagram the fallback declines on the host, so a transport failure and
+    #    an answer differ only in the retry -- which is the cheapest place to see
+    #    that the retry is keyed on the exception and not on the site.
+    youtube = "https://youtu.be/never-fetched"
+    _failed, asked, _pauses, _logged = _run([blip(), blip()], youtube)
+    assert asked == ["video", "video"], asked
+    _answered, asked, _pauses, _logged = _run(
+        [_download_error("ERROR: [youtube] x: Video unavailable", None)], youtube
+    )
+    assert asked == ["video"], f"no probe off Instagram, and no retry for an answer: {asked}"
+
+    print("ok  a transport failure costs one retry; an answer from the site costs none")
+
+
 def _probe_container_and_codec(path: Path) -> tuple[str, str, int, int]:
     """What the file on disk really is: (container, codec, width, height).
 
@@ -4569,6 +4856,7 @@ def _self_check() -> None:
     _check_failure_replies()
     _check_failed_extraction_keeps_its_error()
     _check_only_instagram_can_be_an_image_post()
+    _check_transport_failures_are_retried()
     _check_unattempted_links_are_recorded()
     _check_insult_detection()
     _check_album_delivery()
