@@ -63,6 +63,10 @@ never proved the bot sends one. Different claims.**
 | **THEIRS — hard-stop** | the real group `Sindicato de Pibes que Laburan` (-1002462983768) for *probes*; the user's Telegram account; their gh account |
 | **Hard bar for every agent from now on** | **Never call `getUpdates` and never start a second bot** -- Telegram allows one poller and the live one is mine. |
 | Known traps | `timeout(1)` absent on this Mac. `python3` on PATH is Anaconda 3.11.7; `/usr/bin/python3` is 3.9.6. yt-dlp warns about a missing JS runtime and works anyway. Facebook rate-limits after ~5 self-check runs in 25 min and the symptom is `Cannot parse data`, indistinguishable from a dead post. |
+| **Trap measured 2026-08-10 17:15** | **macOS TCC can revoke the whole project mid-run** — `stat` keeps working while every `open()`/`listdir()` returns `EPERM`, for the CEO *and* every agent, **and it reproduces with the sandbox disabled** so it is not the Claude sandbox. Owner clears it with Full Disk Access. **`/private/tmp` stays writable**: write the handoff there first, then copy it in. The live bot is unaffected — its handles predate the lockout. |
+| **Trap measured 2026-08-10** | **A live link is an unbounded download**: ~6 MB/min forever, and `temp_workspace`'s cleanup never runs because it is a `finally` on a `download_into` that never returns. Probe it only in a child process with a hard `SIGKILL`. |
+| **Trap in the field names** | `was_live` is `True` for a **finished** stream, which is an ordinary bounded video and must still be delivered. A live guard keyed on it silently rejects every replay. Use `is_live` or `live_status == 'is_live'`. |
+| **The bot's log** | The live process writes to `/private/tmp/bot-live.log` (my redirect). **It contains the token** until order 14 slice 0 lands — I chmodded it 600 at 17:14. Read it with `sed 's/bot[0-9]*:[A-Za-z0-9_-]*/bot<TOKEN>/'`. |
 
 ### Acceptance criteria of the original GOAL — all seven verified
 Criteria 1-3 and 5-7 were closed during the GOAL session (`run-history/01-goal-session.md`).
@@ -77,6 +81,10 @@ Criteria 1-3 and 5-7 were closed during the GOAL session (`run-history/01-goal-s
 | Sub-task | Windows launcher unverified | No Windows machine exists in this run. Promote when a friend runs it. |
 | Idea, **offered and awaiting a call** | Keep Telegram's own backlog instead of dropping it, filtered by message age (~15-20 min), so a link posted while nobody hosted still arrives | The owner cancelled the in-memory queue because it dies with the process -- correctly. This is the version that survives that, and it needs no queue and no dependency. It re-opens a measured decision (`drop_pending_updates=True`, 7 updates queued in one real gap), so it needs his call, not mine. |
 | Sub-task | Ledger fragments across rotating hosts | Accepted at this volume; `cat` is the merge. Promote if hosts multiply. |
+| **Sub-task, next front** | **Order 13 slice 1 — the live-stream guard.** Everything expensive is done: the risk is measured, the `was_live` trap is found, the design is written and 22 additive lines already exist. Continue the agent **in its own worktree** (`agent-a34638c67b88f2b8a`) to keep the WIP. **Promote first**; it is the only unbounded-work hole left. |
+| **Sub-task** | **Order 13 slice 2 — `MAX_LINKS_PER_MESSAGE = 5`.** Proposed, unmeasured, unbuilt. Cheap. |
+| **Sub-task** | **Order 14 slices 1-3 — `is_supported` must never raise.** Confirmed defect with a passing control arm; a malformed URL from a Telegram entity costs the whole message. Order written; only slice 0 was dispatched. |
+| Idea | Verify `match_filter` empirically — the same live URL *with* the guard, expecting **0 bytes**. Currently read from yt-dlp's source, never run. | Do it the moment slice 1 lands; it is the non-vacuity proof for that guard. |
 
 ### Standing re-read triggers
 - after a compaction or a gap -> `~/.claude/skills/ceo/references/run-loop.md` (Cold resume) + `continuation.md`
