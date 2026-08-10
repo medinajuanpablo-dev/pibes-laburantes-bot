@@ -11,7 +11,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 |---|---|
 | what it does, how to run it, the architecture | `README.md` §1–§2 |
 | the launchers, the baton pass, one-poller-per-token | `README.md` §2.1 and §4.9 |
-| `/instalar`, why it is a message and not a file, the one parse mode in this file | `README.md` §2.2 ← read before touching `install_reply` |
+| `/instalar`, its line budget, why it is a message and not a file, the one parse mode in this file | `README.md` §2.2 ← read before touching `install_reply` |
 | how the owner ships a change, bumps a pin, sets up a new host | `docs/updating.md` |
 | what a friend hosting the bot is told (Spanish, product copy) | `EMPEZAR-ACA.md` |
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
@@ -121,6 +121,12 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   A launcher on its own is also inert — its first act is `git pull` in a directory with no `.git` —
   but that objection alone would not settle it, because a bootstrap that clones and hands off is
   still a file you double-click. The two measurements are what settle it.
+- **The install reply has a line budget and it is asserted exactly** — three lines per platform,
+  five for both. It is a product decision, not formatting: a friend taps and skims, and at 22 lines
+  the line that mattered was the one skipped. A line earns its place only by stopping somebody in
+  the next minute, which is why the reply names **git and the token and nothing else**, and why the
+  one-host-at-a-time rule and the double-click-from-now-on payoff live in `EMPEZAR-ACA.md`, which
+  arrives with the clone. Adding a line here means taking one out. `README.md` §2.2.
 - **Exactly one reply in this file sets a `parse_mode`, and `_reply_text`'s default must stay
   `None`.** `/instalar` needs HTML for its code block, which is what makes Telegram offer
   tap-to-copy. Every other reply — the apology, the oversize line with a raw URL in it, the insult
@@ -275,9 +281,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   builder, or **reversed** (that last one is invisible to the name and shape asserts and is what the
   invariance assert is for) · a fake token that is not token-shaped, or the two fakes made equal ·
   `CLONE_URL` pointed at another repository or written as the ssh remote · `CLONE_DIR` keeping its
-  `.git` suffix · any of the three warnings dropped — the owner-hands-out-the-token line, the
-  one-host-at-a-time line, the macOS Command Line Tools dialog, or the Git-for-Windows link. Note
-  that a bare `"git" in text` assert is **vacuous**: the pasted command contains `git clone`.
+  `.git` suffix · either warning dropped — the owner-hands-out-the-token line, the macOS Command
+  Line Tools dialog, or the Git-for-Windows link. Note that a bare `"git" in text` assert is
+  **vacuous**: the pasted command contains `git clone`. · **a line added to the reply, or one
+  removed** — the budget is three lines per platform and five bare, and it is asserted exactly,
+  because the defect it replaced was a 22-line wall nobody read to the end of.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.
@@ -342,7 +350,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   — allowed tags only, no bare `&`, under the length ceiling — but no message has been sent, so
   "the `<pre>` block offers tap-to-copy" is read from Telegram's documentation and not measured.
   What to watch on the first real send: that the block renders as a block with a copy affordance,
-  that the `&&` arrives as `&&` and not `&amp;&amp;`, and that the whole thing is one message.
+  that the `&&` arrives as `&&` and not `&amp;&amp;`, and that the whole thing is one message. The
+  shrink added one thing to watch: the reply now carries **no blank lines at all**, on the
+  assumption that a `<pre>` block separates itself visually from the sentence above it. If it does
+  not, the fix is a blank line and a bumped number in the budget assert, not a rewritten reply.
 - **Why yt-dlp coloured one ledger record and not the next is unknown**, and the search was stopped
   on purpose after the TTY theory was refuted (pipe and pseudo-TTY both produced no escapes). The
   strip is unconditional so the cause does not matter; do not gate it on a condition to "fix it

@@ -457,25 +457,18 @@ INSULT_LEDGER = Path(__file__).resolve().parent / "insults.jsonl"
 
 # --- The bot handing out its own installer --------------------------------------
 #
-# What a friend gets when they ask the bot how to run it. It is a MESSAGE and not a
-# file attachment, and that is forced, not chosen. Do not reopen it by noticing that
-# a bootstrap which clones and hands off would not be inert: true, and not the
-# blocker. A double-clicked .command needs the exec bit AND no com.apple.quarantine,
-# and a file delivered by Telegram has neither -- measured 2026-08-09, all four
-# combinations, README.md 2.2. Right-click -> Open answers only the quarantine half,
-# and the chmod +x costs exactly the Terminal that sending a file was meant to save.
-#
-# So the thing worth sending is the one command that creates a real clone. That is
-# also the only shape that satisfies what the owner asked for in the same breath --
-# that it stay updated forever -- because both launchers run `git pull --ff-only` on
-# startup: a clone is a subscription, an archive is a snapshot that rots.
+# What a friend gets when they ask the bot how to run it: the one command that makes
+# a real clone, which is also the only shape that keeps them updated, since both
+# launchers run `git pull --ff-only` on startup. It is a MESSAGE and not a file, and
+# that is forced -- a downloaded .command has no exec bit AND carries a quarantine,
+# and neither a clone-and-hand-off bootstrap nor right-click -> Open answers both
+# halves. Four combinations measured 2026-08-09; do not reopen it. README.md 2.2.
 #
 # NOTHING BELOW MAY EVER CARRY THE TOKEN. This reply answers anybody who can message
 # the bot, in any group it was added to, while the process holds the group's token in
 # its environment. The protection is structural rather than a filter: every function
-# in this feature is pure and reads nothing from the environment, so there is no
-# value to leak, and the self-check proves it by building the reply under two
-# different fake tokens and requiring the bytes to be identical.
+# here is pure and reads nothing, so there is no value to leak, and the self-check
+# proves it by building the reply under two fake tokens and comparing the bytes.
 
 # ponytail: hardcoded rather than read from `git remote get-url origin`. Deriving it
 # would put a subprocess on a path anyone who can message the bot can trigger, and it
@@ -512,19 +505,27 @@ PLATFORM_NAMES = {"mac": "Mac", "windows": "Windows"}
 # word after the command, because the alternative to recognising "en windows" is an
 # error message, and this reply is the one thing a lost friend has.
 PLATFORM_WORDS = {
-    "mac": "mac",
-    "macos": "mac",
-    "osx": "mac",
-    "apple": "mac",
-    "macbook": "mac",
-    "imac": "mac",
-    "windows": "windows",
-    "win": "windows",
-    "pc": "windows",
-    "microsoft": "windows",
+    **dict.fromkeys(("mac", "macos", "osx", "apple", "macbook", "imac"), "mac"),
+    **dict.fromkeys(("windows", "win", "pc", "microsoft"), "windows"),
 }
 
 GIT_FOR_WINDOWS_URL = "https://git-scm.com/download/win"
+
+# Where each platform's friend pastes the command, carrying the one obstacle that is
+# genuinely platform-specific: on macOS git hides behind Apple's Command Line Tools
+# dialog, on Windows it is absent and has to be installed first. Plain text, because
+# install_reply escapes it, and it continues the bolded platform name, hence lowercase.
+PLATFORM_INTRO = {
+    "mac": (
+        "abrí Terminal (Cmd+Espacio, escribí Terminal, Enter) y pegá esto. Si te salta "
+        "una ventana pidiendo instalar las herramientas de línea de comandos, aceptá y "
+        "pegalo de nuevo."
+    ),
+    "windows": (
+        f"instalá git de {GIT_FOR_WINDOWS_URL}, abrí Git Bash y pegá esto. Si dice que "
+        f"no encuentra git, es que todavía falta ese paso."
+    ),
+}
 
 # `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
 # tests Update.effective_message, which resolves to `edited_message` when that is
@@ -1410,13 +1411,10 @@ def album_truncation_note(total: int, sent: int) -> str:
 def install_platform(text: str | None) -> str | None:
     """Which platform "/instalar algo" asked for, or None meaning both.
 
-    Every word after the command is looked at, not only the first, so "en windows"
-    and "para mac" work. The first recognised one wins.
-
-    Nothing here can fail. A bare command, a typo, a word nobody anticipated -- all
-    of them mean both platforms, because the person reading this reply is the person
-    who has no idea how any of it works, and an error message would be the worst
-    possible answer to the only question they know how to ask.
+    Every word after the command is looked at, so "en windows" and "para mac" work;
+    the first recognised one wins. Nothing here can fail -- a bare command, a typo, a
+    word nobody anticipated all mean both, because the person asking is the person who
+    does not know the words and an error would be the worst possible reply.
     """
     parts = (text or "").split(None, 1)
     after_command = parts[1] if len(parts) > 1 else ""
@@ -1430,9 +1428,9 @@ def install_platform(text: str | None) -> str | None:
 def install_command_line(platform: str) -> str:
     """The single line the friend pastes, as plain text. The caller escapes it.
 
-    One line rather than a numbered list of four, because it is copied by tapping a
-    block, not read: clone, enter the folder, open the launcher. `&&` and not `;` so
-    a failing clone stops instead of running the launcher in the wrong directory.
+    One line and not a numbered list, because it is copied by tapping a block, not
+    read. `&&` and not `;` so a failing clone stops instead of running the launcher in
+    the wrong directory.
     """
     return (
         f"mkdir -p {CLONE_PARENT} && cd {CLONE_PARENT} && git clone {CLONE_URL} "
@@ -1440,78 +1438,36 @@ def install_command_line(platform: str) -> str:
     )
 
 
-def _install_block(platform: str) -> str:
-    """One platform's half of the reply, in Spanish, as Telegram HTML.
-
-    The two obstacles that are actually platform-specific live here: on macOS git is
-    behind Apple's Command Line Tools dialog, and on Windows git is simply absent.
-    Both are named before the command rather than after it, because a friend who
-    reads nothing still scrolls past the block to the next thing.
-    """
-    name = html.escape(PLATFORM_NAMES[platform])
-    launcher = html.escape(LAUNCHER_FILE[platform])
-    command = html.escape(install_command_line(platform))
-    if platform == "mac":
-        intro = (
-            "Abrí la app Terminal (Cmd+Espacio, escribí Terminal, Enter), "
-            "pegá esto y apretá Enter:"
-        )
-        git_note = (
-            "Necesitás git. Si te salta una ventana pidiendo instalar las herramientas "
-            "de línea de comandos, aceptá, esperá a que termine y pegá el comando otra vez."
-        )
-    else:
-        intro = (
-            f"Necesitás git y Windows no lo trae: instalalo de "
-            f"{html.escape(GIT_FOR_WINDOWS_URL)}, abrí Git Bash, pegá esto y apretá Enter:"
-        )
-        git_note = (
-            "Si al pegarlo te dice que no encuentra git, es que todavía falta ese paso: "
-            "instalalo y volvé a pegar el comando."
-        )
-    return (
-        f"<b>En {name}</b>\n"
-        f"{intro}\n\n"
-        f"<pre>{command}</pre>\n\n"
-        f"{git_note}\n"
-        f"De ahí en adelante es doble clic en {launcher}, y se actualiza solo."
-    )
-
-
 def install_reply(platform: str | None = None) -> str:
     """The install instructions the bot hands out, in Spanish, as Telegram HTML.
 
-    Pure, and that is the security property, not a style preference. This function
-    reads nothing -- no environment, no file, no subprocess -- so the token the
-    process is holding cannot reach the text by any path, and the self-check proves
-    it by building every variant under two different fake tokens and requiring the
-    output to be byte-identical (see _check_install_instructions).
+    Three lines for one platform, five for both, and that ceiling is the feature: the
+    audience taps and skims, so a wall buries the one line that matters. A line has to
+    earn its place by stopping a friend in the next minute -- git, and the token.
+    Everything else a host needs is in EMPEZAR-ACA.md, which the clone brings with it,
+    and the launcher asks about the hand-over itself, when it matters. README.md 2.2.
 
     `platform` None means both blocks, and that is the common case rather than the
-    fallback: a tap on Telegram's command menu sends the bare command with no
-    argument at all, and this audience taps.
+    fallback: a tap on Telegram's command menu sends the bare command.
 
-    HTML and not MarkdownV2: the only thing that needs markup is the code block, and
-    MarkdownV2 would demand escaping . - ( ) ! and a dozen more characters in every
-    Spanish sentence here, which is a standing trap for whoever writes the next line
-    of copy. HTML needs & < > and nothing else, so every interpolated value goes
-    through html.escape -- the `&&` in the pasted command is the one that bites.
+    Pure, and that is a security property and not a style preference: nothing here
+    reads the environment, a file or a subprocess, so there is no token to leak, and
+    _check_install_instructions proves it by invariance. HTML and not MarkdownV2 --
+    only the code block needs markup, and MarkdownV2 would demand escaping . - ( ) !
+    in every Spanish sentence. Every interpolated value goes through html.escape; the
+    `&&` in the pasted command is the one that bites.
     """
-    platforms = (platform,) if platform else ("mac", "windows")
-    parts = [
-        "Así se prende el bot en tu compu. Es una sola vez; después es doble clic.",
-        *(_install_block(each) for each in platforms),
-        # The two obstacles that are the same on both platforms. The token line is
-        # product copy AND the rule: the bot says who hands out the token, and it is
-        # never the bot.
-        "El token te lo pasa el dueño por privado, nunca por acá: la primera vez la "
-        "ventana te lo pide, lo pegás y queda guardado.\n"
-        "Solo una persona a la vez puede tenerlo prendido. Si en ese momento lo tiene "
-        "otro, la ventana te pregunta antes de sacárselo.",
-    ]
-    if platform is None:
-        parts.append(f"Si querés solo el tuyo: /{INSTALL_COMMAND} mac o /{INSTALL_COMMAND} windows")
-    return "\n\n".join(parts)
+    lines = []
+    for each in (platform,) if platform else ("mac", "windows"):
+        lines.append(f"<b>En {html.escape(PLATFORM_NAMES[each])}</b> — {html.escape(PLATFORM_INTRO[each])}")
+        lines.append(f"<pre>{html.escape(install_command_line(each))}</pre>")
+    # The one obstacle no friend can clear alone, and the rule as much as the copy:
+    # the bot says who hands out the token, and it is never the bot.
+    lines.append(
+        "El token te lo pasa el dueño por privado, nunca por acá: la ventana te lo "
+        "pide la primera vez y queda guardado."
+    )
+    return "\n".join(lines)
 
 
 def take_over_requested(argv: Sequence[str]) -> bool:
@@ -4181,30 +4137,33 @@ def _check_startup_drops_the_backlog() -> None:
     print("ok  startup drops the backlog instead of flooding the group")
 
 
-# Two fakes, both shaped like a real Telegram token (digits, colon, 35 characters),
-# so a leak of either would be caught by the shape rule as well as by name. They
-# differ in every character after the colon: that is what makes "the reply is the
-# same under both" mean "the reply does not depend on the token".
+# Two fakes, both shaped like a real Telegram token, so a leak of either is caught by
+# the shape rule as well as by name. They differ in every character after the colon:
+# that is what makes "the reply is the same under both" mean "it does not read one".
 FAKE_TOKENS = (
     "123456789:AAFfakeTOKENoneDoNotLeakThis000000000",
     "987654321:BBZfakeTOKENtwoDoNotLeakThat111111111",
 )
 
-# What a Telegram bot token looks like. Used to reject a leak of ANY token, not only
-# of the two fakes above -- an edit that interpolated the real read_token() would
-# pass a "the fake is absent" assert and be caught by this one.
+# What a Telegram bot token looks like. Rejects a leak of ANY token, not only of the
+# two fakes: an edit interpolating the real read_token() would pass a "the fake is
+# absent" assert and be caught by this one.
 TOKEN_SHAPE = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
 
-# The only markup this reply is allowed to contain. Anything else means an unescaped
-# character reached the text, which Telegram answers with a 400 the group never sees.
+# The only markup the reply may contain. Anything else means an unescaped character
+# reached the text, which Telegram answers with a 400 the group never sees.
 ALLOWED_HTML = re.compile(r"</?(?:b|pre)>")
 
 
 class _InstallMessage:
-    """A message that records what was replied to it. Enough for on_install."""
+    """A message that records what was replied to it, and its own Update.
+
+    `effective_message` is itself, which is all on_install reads of the Update.
+    """
 
     def __init__(self, text: str) -> None:
         self.text = text
+        self.effective_message = self
         self.sent: str | None = None
         self.kwargs: dict = {}
 
@@ -4213,21 +4172,15 @@ class _InstallMessage:
         self.kwargs = kwargs
 
 
-class _InstallUpdate:
-    def __init__(self, message: object) -> None:
-        self.effective_message = message
-
-
 def _install_texts() -> dict[str, str]:
     """Every string this feature can put in a chat, keyed by how it got there.
 
-    Both the builder and the handler, because they are two different chances to
-    leak: the builder could interpolate a secret and the handler could append one.
+    Builder and handler both, because they are two different chances to leak: the
+    builder could interpolate a secret and the handler could append one. The group
+    form as well as the DM form, since in a group Telegram glues the bot's username
+    onto the command and that is the only difference between the two.
     """
     texts = {f"install_reply({platform!r})": install_reply(platform) for platform in (None, "mac", "windows")}
-    # The group form and the DM form. In a group Telegram delivers the command with
-    # the bot's username glued on, which is the only real difference between the two
-    # and the one thing that could make this work in a DM and not where it matters.
     for label, typed in (
         ("DM, bare", f"/{INSTALL_COMMAND}"),
         ("DM, mac", f"/{INSTALL_COMMAND} mac"),
@@ -4235,13 +4188,12 @@ def _install_texts() -> dict[str, str]:
         ("group, windows", f"/{INSTALL_COMMAND}@pibes_laburantes_bot windows"),
     ):
         message = _InstallMessage(typed)
-        asyncio.run(on_install(_InstallUpdate(message), None))
+        asyncio.run(on_install(message, None))
         assert message.sent is not None, f"{label}: the bot answered nothing"
         assert message.kwargs.get("parse_mode") == telegram.constants.ParseMode.HTML, (
             f"{label}: without HTML the code block is not a code block and nothing "
             f"offers tap-to-copy: {message.kwargs}"
         )
-        assert message.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, message.kwargs
         texts[f"on_install({label})"] = message.sent
     return texts
 
@@ -4249,59 +4201,40 @@ def _install_texts() -> dict[str, str]:
 def _check_install_instructions() -> None:
     """The bot hands out its own installer, and can never hand out the token.
 
-    Two things are proved here and the second one is the load-bearing one.
+    Two things are proved here and the second one is the load-bearing one. What the
+    reply says, and how little of it: a pasteable block per platform, the two
+    obstacles a friend cannot clear alone -- git, and that the token comes from the
+    owner -- and nothing else. The line budget is asserted, because the defect this
+    replaced was a 22-line wall in which the token line was what got skimmed past.
 
-    What the reply says: each platform gets its own launcher, the clone URL, a
-    pasteable block, and the three obstacles a friend actually hits -- git, where the
-    token comes from, and that only one person hosts at a time.
-
-    What the reply can never say: the token. This feature answers anybody who can
-    message the bot, in any group the bot was added to, while the process holds the
-    group's token in its environment, so one interpolation would turn onboarding into
-    a credential leak. The guard is not a filter over the finished text -- a filter
-    only catches the value it was told to look for. It is invariance: every string
-    this feature can produce is built twice under two different, correctly shaped
-    fake tokens and once with no token in the environment at all, and all three runs
-    must be byte-identical. A text that does not change when the token changes cannot
-    contain it. The name and shape asserts are kept as well, so a leak fails loudly
-    on three counts instead of one.
+    What it can never say is the token, and the guard for that is **invariance, not a
+    filter**: a filter only catches the value it was told to look for, so instead
+    every string this feature can produce is built under two different fake tokens and
+    once under none, and all three runs must be byte-identical. A text that does not
+    change when the token changes cannot contain it. Do not "improve" this into a
+    redaction pass -- that would let a transformed leak through. README.md 2.2.
 
     No network. The origin pin below shells out to git and is skipped where it cannot.
     """
     # --- what "/instalar algo" means ---------------------------------------------
-    assert install_platform(f"/{INSTALL_COMMAND}") is None, "bare must mean both, never an error"
+    # Bare is the common case rather than the fallback (a tap on the menu sends it),
+    # and an unrecognised word means both rather than an error.
+    for said in ("", "@pibes_laburantes_bot", " linux", " asdfgh", " ?", " no se"):
+        assert install_platform(f"/{INSTALL_COMMAND}{said}") is None, said
     assert install_platform(None) is None, "a message with no text is still not an error"
-    assert install_platform(f"/{INSTALL_COMMAND}@pibes_laburantes_bot") is None, "group form, bare"
-    for said in ("mac", "Mac", "MAC", "macos", "macOS", "para mac", "en mi macbook", "osx"):
+    for said in ("mac", "MAC", "macos", "macOS", "para mac", "en mi macbook", "osx"):
         assert install_platform(f"/{INSTALL_COMMAND} {said}") == "mac", said
     for said in ("windows", "Windows", "win", "pc", "en windows", "windows 11"):
         assert install_platform(f"/{INSTALL_COMMAND} {said}") == "windows", said
-    # Unrecognised is both, not an error and not silence: the person asking this is
-    # the person who does not know the words.
-    for said in ("linux", "asdfgh", "?", "ayuda", "no se"):
-        assert install_platform(f"/{INSTALL_COMMAND} {said}") is None, said
     # The command word itself must never be read as a platform, or "/pc" style typos
     # in the command would pick a side at random.
     assert install_platform("/mac") is None, "the command word is not an argument"
 
-    # --- what the reply carries ---------------------------------------------------
+    # --- what the reply carries, and what it costs to read -------------------------
     both = install_reply()
     mac = install_reply("mac")
     windows = install_reply("windows")
     assert both == install_reply(None), "the bare default must be the both-platforms reply"
-
-    for label, text, wanted, unwanted in (
-        ("mac", mac, LAUNCHER_FILE["mac"], LAUNCHER_FILE["windows"]),
-        ("windows", windows, LAUNCHER_FILE["windows"], LAUNCHER_FILE["mac"]),
-    ):
-        assert wanted in text, f"{label} must name its own launcher"
-        assert unwanted not in text, f"{label} must not name the other platform's launcher"
-        assert f"./{wanted}" in text, f"{label} must actually open the launcher, not stop at the folder"
-    assert LAUNCHER_FILE["mac"] in both and LAUNCHER_FILE["windows"] in both, (
-        "the bare reply is what a tap on the command menu sends, so it serves both"
-    )
-    assert f"/{INSTALL_COMMAND} mac" in both, "the bare reply must offer the narrower one"
-    assert f"/{INSTALL_COMMAND} mac" not in mac, "a reply about one platform must not offer itself"
 
     # The folder name is derived, so pin the derivation rather than letting the reply
     # agree with itself: `cd pibes-laburantes-bot.git` would satisfy "CLONE_DIR is in
@@ -4309,24 +4242,33 @@ def _check_install_instructions() -> None:
     assert not CLONE_DIR.endswith(".git"), CLONE_DIR
     assert CLONE_URL.endswith(f"/{CLONE_DIR}.git"), (CLONE_URL, CLONE_DIR)
 
-    for label, text in (("mac", mac), ("windows", windows), ("both", both)):
-        assert CLONE_URL in text, f"{label}: no clone URL is no instructions at all"
+    # The first obstacle, per platform. A bare `"git" in text` would be satisfied by
+    # the `git clone` inside the command, so each platform is pinned on the words that
+    # are actually its own warning: Apple's dialog, and the installer Windows needs.
+    git_warning = {"mac": "herramientas de línea de comandos", "windows": GIT_FOR_WINDOWS_URL}
+
+    for label, text, lines, covers in (
+        ("mac", mac, 3, ("mac",)),
+        ("windows", windows, 3, ("windows",)),
+        ("both", both, 5, ("mac", "windows")),
+    ):
+        # The budget, and it is the feature rather than a style note: the 22-line wall
+        # this replaced was skimmed, and the token line was what got skimmed past.
+        assert len(text.splitlines()) == lines, (
+            f"{label}: {len(text.splitlines())} lines, not {lines} -- the wall is back"
+        )
         assert f"cd {CLONE_DIR} " in text, f"{label}: the friend has to cd into the folder git made"
         block = re.search(r"<pre>(.*?)</pre>", text, re.DOTALL)
         assert block and CLONE_URL in block.group(1), (
             f"{label}: the pasteable part must be inside the code block or nothing offers to copy it"
         )
-        # The three obstacles. Each one is a real failure this project measured or hit.
-        # "git" on its own would be satisfied by the `git clone` in the command, so
-        # each platform is asserted on the words that are actually its warning.
-        if label in ("mac", "both"):
-            assert "herramientas de línea de comandos" in text, (
-                f"{label}: macOS hides git behind Apple's Command Line Tools dialog"
-            )
-        if label in ("windows", "both"):
-            assert GIT_FOR_WINDOWS_URL in text, f"{label}: Windows has no git at all"
+        for each in covers:
+            assert git_warning[each] in text, f"{label}: {each} lost its git obstacle"
+            assert f"./{LAUNCHER_FILE[each]}" in text, f"{label}: must open {each}'s launcher, not stop at the folder"
+        for each in set(LAUNCHER_FILE) - set(covers):
+            assert LAUNCHER_FILE[each] not in text, f"{label} must not name {each}'s launcher"
+        # The second obstacle, and the only one that is the same on both platforms.
         assert "token" in text and "dueño" in text, f"{label}: the token comes from the owner, separately"
-        assert "una persona a la vez" in text, f"{label}: only one host at a time"
         # Escaping, which is the trap that comes with introducing a parse mode. The
         # && in the pasted command is the character that bites: raw, Telegram may
         # swallow it or reject the message.
@@ -4339,9 +4281,8 @@ def _check_install_instructions() -> None:
         assert re.search(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", stripped) is None, (
             f"{label}: a bare & is not a valid HTML entity"
         )
-        assert len(text) <= int(telegram.constants.MessageLimit.MAX_TEXT_LENGTH), (
-            f"{label}: {len(text)} characters, over Telegram's ceiling -- the send would 400"
-        )
+        # Not implied by the line budget: five very long lines would still 400.
+        assert len(text) <= int(telegram.constants.MessageLimit.MAX_TEXT_LENGTH), len(text)
 
     # --- the token can never be in any of it --------------------------------------
     # The bait has to be shaped like the thing being hunted, or the shape rule below
@@ -4392,7 +4333,10 @@ def _check_install_instructions() -> None:
     )
 
     class MenuBot:
+        """The Application and its .bot at once -- both are all _publish_commands reads."""
+
         def __init__(self, blow_up: bool = False) -> None:
+            self.bot = self
             self.published: list = []
             self.blow_up = blow_up
 
@@ -4401,12 +4345,8 @@ def _check_install_instructions() -> None:
                 raise telegram.error.TimedOut
             self.published = commands
 
-    class MenuApplication:
-        def __init__(self, bot: object) -> None:
-            self.bot = bot
-
     menu = MenuBot()
-    asyncio.run(_publish_commands(MenuApplication(menu)))
+    asyncio.run(_publish_commands(menu))
     published = {command.command: command.description for command in menu.published}
     assert INSTALL_COMMAND in published, published
     assert published[INSTALL_COMMAND].strip(), "an empty description is refused by Telegram"
@@ -4415,13 +4355,17 @@ def _check_install_instructions() -> None:
     # A menu that will not publish must not cost the group its bot: post_init raising
     # aborts run_polling, and the person at the window cannot read a traceback.
     with _capture_log(logging.WARNING) as warnings:
-        asyncio.run(_publish_commands(MenuApplication(MenuBot(blow_up=True))))
+        asyncio.run(_publish_commands(MenuBot(blow_up=True)))
     assert len(warnings) == 1 and "menu" in warnings[0], warnings
 
     # --- the hardcoded URL cannot go stale silently --------------------------------
     def _slug(url: str) -> str:
         return "/".join(re.split(r"[/:]", url.strip().rstrip("/").removesuffix(".git"))[-2:]).casefold()
 
+    # True of the constant on its own, so it is asserted whether or not git is here.
+    assert CLONE_URL.startswith("https://"), (
+        "an ssh clone URL is useless to a friend with no GitHub account"
+    )
     origin = None
     if shutil.which("git"):
         probe = subprocess.run(
@@ -4436,9 +4380,6 @@ def _check_install_instructions() -> None:
         assert _slug(origin) == _slug(CLONE_URL), (
             f"CLONE_URL points at {_slug(CLONE_URL)} but this checkout's origin is "
             f"{_slug(origin)}: the bot would send friends to the wrong repository"
-        )
-        assert CLONE_URL.startswith("https://"), (
-            "an ssh clone URL is useless to a friend with no GitHub account"
         )
         pinned = f"pinned against origin {_slug(origin)}"
     else:

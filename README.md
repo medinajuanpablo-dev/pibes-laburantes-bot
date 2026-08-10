@@ -210,11 +210,23 @@ command is the one that bites. **`_reply_text` still defaults to no parse mode**
 is load-bearing: the apology, the oversize line and the insult answer are unescaped Spanish, one of
 them carrying a raw URL.
 
-**Three things the reply says, because each one is an obstacle somebody actually hits.** `git` has
-to be there — on macOS running it without the Command Line Tools pops Apple's installer dialog, on
-Windows it is absent entirely and the reply links the installer. The **token comes from the owner,
-separately**, and the launcher asks for it on first run. And **only one person hosts at a time**,
-which is why the launcher asks before taking over (§2.1).
+**Two things the reply says, and its length is the third decision.** One platform is **three
+lines** — where to paste, the block, the token — and both platforms are **five**. That ceiling is
+the feature and it is asserted, not a style note: the wall it replaced was 12 lines per platform
+and **22 bare**, and the audience taps and skims, so the one line that matters was the one that got
+skimmed past. A line earns its place by stopping a friend in the next minute, and exactly two do.
+**`git` has to be there** — on macOS running it without the Command Line Tools pops Apple's
+installer dialog, on Windows it is absent entirely and the reply links the installer. And the
+**token comes from the owner, separately**, which the launcher asks for on first run.
+
+**What was cut went somewhere, it was not dropped.** *Only one person hosts at a time* is not
+something a friend acts on while reading a chat message: the launcher asks before taking over, at
+the moment it matters (§2.1), and `EMPEZAR-ACA.md` opens with it. *From now on it is a double-click
+and it updates itself* is the same, and lives under "Cada vez" in that file — which the clone
+brings with it, so every reader of this reply gets it within the minute. The bare reply also
+stopped spending a line advertising `/instalar mac`: `EMPEZAR-ACA.md` offers both narrow forms, and
+tapping that line in Telegram would have sent the bare command again anyway, since only the
+`/instalar` part is a tappable command and the ` mac` after it is plain text.
 
 **The clone URL is hardcoded, not derived.** `git remote get-url origin` would answer at runtime,
 but it would put a subprocess on a path anyone who can message the bot can trigger, and it would
