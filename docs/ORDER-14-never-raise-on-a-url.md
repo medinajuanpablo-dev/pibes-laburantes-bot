@@ -195,6 +195,19 @@ neighbours. If slice 2 built nothing, only slice 1 gets an entry.
 
 ## CHECKPOINT
 
-Report: what you ran; the mutation table; every caller of `is_supported` and whether any relied on the
-raise; slice 2's measurement and which outcome you took; anything in this order wrong on fact; every
+**This order has been dispatched twice with different scope — report against the slices you were
+actually given, not the whole list.**
+
+*If you were scoped to slice 0 only* (the 2026-08-10 17:36 dispatch): what you ran; the mutation table,
+whose load-bearing entry is **the fix widened until it silences the bot's own logger too**; **which
+logger actually emits the token line, verified rather than assumed**; proof that all five of the bot's
+own startup and field lines still appear at INFO; anything in this order wrong on fact; every
 `ponytail:` left.
+
+*If you were given slices 1-3*: the above, plus every caller of `is_supported` and whether any relied on
+the raise, and slice 2's measurement with which of its two outcomes you took.
+
+---
+*Self-audit 6/6 on this order, 17:41 — one finding, fixed here: the CHECKPOINT asked for slices 1-3
+material after the dispatch was scoped to slice 0 only, so a slice-0 agent would have read its own
+report as incomplete. The title and the scope line were already re-read and are consistent.*
