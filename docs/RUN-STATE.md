@@ -445,3 +445,27 @@ way to create a pending update without a person posting. Sequence, to run once i
    instead of `bot.py` — which would be a plan change, logged before anything is re-dispatched.
 
 Deliberately **not** requested yet: asking for the paste before the code is merged wastes it.
+
+### Landing — item 1, the live-stream guard. **APPROVED**, four layers. `main` = `64d8a2f`
+| Layer | Evidence |
+|---|---|
+| **Gates** | `py_compile` OK and `--self-check` **exit 0** in the agent's worktree before the trunk, and again after the merge. Four new live-stream checks pass, including *"a live stream is refused before a byte; a finished one is still delivered"*. Still six real downloads. |
+| **Diff faithful** | `bot.py` +378 and `README.md` +104, nothing else. Of the 378, **89 are comment/docstring and 49 are asserts or prints** — the product code is a small fraction, which is the right shape for a guard whose whole risk is a field name. It left `AGENTS.md` alone and handed me the must-stay-red delta, per the standing rule. |
+| **Live — RUN, and it is the measurement that was missing** | Drove the real `download_into` against `youtube.com/watch?v=X4VbdwhkE10`: **`LiveStreamError` in 3.4 s and 0 bytes on disk.** Unguarded, the same call wrote **2,097,152 bytes in 20 s** and had to be killed. Then the control arm on the real metadata of the finished stream `zo5oewEQbsE`: **accepted**, `was_live=True`, `live_status=was_live`, duration 1146, `is_live_stream()` → `False`, 0 bytes. **Criteria 1 and 2 both closed live.** Prediction was written before the run and matched on both. |
+| **Adversarial** | The agent shipped its own table; **I re-ran the two that matter.** Keying the guard on `was_live` → `AssertionError: a FINISHED stream is an ordinary video`. Choosing the reply from the text instead of the exception class → red. Both in the direction that would ship a silent regression. |
+
+**Why it is not vacuous:** the refusal is `is_live` **or** `live_status == "is_live"`, and `was_live` is
+deliberately not read — with a check asserting the finished stream survives, which is the only thing that
+catches the silent version. A second check asserts `LIVE_STREAM_REPLY` is **not** in
+`FAILURE_SIGNATURES`, which pins the "chosen from the class, never the text" rule the order demanded.
+
+### Two process errors of mine on this landing
+1. **I merged at three commits because my waker counted commits — and the agent was still working.** It
+   then produced a fourth: *"drop a vacuous assert from the live-stream copy check"*, where it caught
+   **its own** check asserting the Spanish line contains no `"vivos"` — a word no Spanish reply here
+   would ever contain, so the assertion could never fire. Fake rigor, removed by the agent, not by me.
+   **A commit count is a heartbeat, not a completion signal; the report is.** The tail commit is parked
+   and merges when it reports.
+2. **I rebased its branch while it was still working in that worktree.** That rewrites commits under a
+   live agent's feet. It survived — it committed cleanly on top of the rebased branch — but that is luck,
+   not process. **Rebase after the report, never during.**
