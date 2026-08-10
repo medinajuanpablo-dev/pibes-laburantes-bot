@@ -542,3 +542,49 @@ status directly, never through a pipe that can close early, and never hide stder
 "slices 1-3" arm says *"the above, plus…"*, which demands slice 0's evidence from an agent forbidden to
 touch slice 0. **My self-audit fixed the mirror image of that bug and left this one**, which is exactly
 the failure mode `audit.md` describes for editing a shipped order.
+
+### Landing — item 3, the backlog is kept. **APPROVED**, four layers. And criterion 4 is PROVEN LIVE
+| Layer | Evidence |
+|---|---|
+| **Gates** | `--self-check` **EXIT=0** in the worktree and on the trunk, exit read directly (no pipe). Six real downloads unchanged. |
+| **Diff faithful** | Two functional lines: `drop_pending_updates` `True → False`, and the assertion pinning it. Nothing else. |
+| **Live — RUN, the whole point** | **Bot off 19:19:30. Owner pasted a reel into the gap. Bot started 19:26:50. Delivered 19:26:55** — `sending …/reel/Db09gfkPfW9/ as video (835322 bytes)`, four seconds after startup. **Criterion 4 closed.** |
+| **Adversarial** | The agent's two mutations plus **mine**: flipping the flag back to `True` → `AssertionError: {'drop_pending_updates': True}`. My mutation script asserted the file changed first. |
+
+**And the premise that could have made item 3 ship dead is now measured, not read.** The launcher's probe
+was the risk: if it consumed the backlog, a friend's launcher would eat the pending updates before the bot
+ever saw them. Ran the launcher's exact call **twice** against a real pending update:
+
+```
+probe 1 -> ok=True, 1 pending, update_id=693663208
+probe 2 -> 1 pending, update_id=693663208   (the SAME id)
+```
+
+Same id twice ⇒ **the probe does not consume.** That is the control arm built into the measurement.
+
+### I refuted a cost I had documented myself, twenty minutes after writing it
+The order-16 agent reasoned that a baton pass would now **repeat the newest link**: the yielding instance
+cannot acknowledge its last batch, because its shutdown `getUpdates` meets the same 409 that made it
+yield. Plausible, carefully argued, and **it flagged itself as inference rather than measurement** — which
+is what made it checkable. I wrote it into `AGENTS.md` as an accepted cost.
+
+**Then I measured it and it is false.** With a real taker polling, verified alive before and after:
+
+```
+GET /getUpdates?timeout=0&offset=<last+1>   ->   HTTP 200, ok:true, no error_code
+```
+
+It does not 409. A `timeout=0` `getUpdates` **displaces** the other poller for an instant and wins — the
+exact mechanism this project already documents for the launcher's probe, and the one behind my own
+standing rule that *my curl is never a liveness test*. **Two independent signals**: the 200, and the
+absence of PTB's *"updates may be fetched again"* warning on the yielding side. The control arm: the taker
+was still polling after being displaced, so the call really did contend.
+
+`AGENTS.md` and `README.md` §2.1 corrected by me. `bot.py` still carries the claim in a comment and I may
+not touch it → **order 17**, one comment, zero executable lines, with an explicit escape hatch telling the
+agent to refute *me* if my measurement is wrong.
+
+### The handover itself, measured again in passing
+Incumbent yielded at exactly 60 s (`the conflict lasted 60 s; stopping so the window says so`), stopped
+cleanly, printed the Spanish line for the person at the window, and **exactly one instance survived.** The
+baton pass still works with the backlog kept.
