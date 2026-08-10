@@ -493,3 +493,52 @@ turned it into a plausible result. Rerun without it, the probe returned six rows
 **Still unmeasured, and honestly so:** `is_upcoming` (a premiere). I looked and the channels I checked had
 none right now, so the agent's `ponytail:` stands as written — both values fall through rather than being
 guessed at. Not a gap in the landing; a gap in the world's supply of premieres at 20:00 on a Monday.
+
+### Landing — item 2, an unparseable URL no longer costs the whole message. **APPROVED**, four layers
+| Layer | Evidence |
+|---|---|
+| **Gates** | `--self-check` **EXIT=0**, 51 `ok` lines, in the worktree before the trunk and again after the merge. Six real downloads unchanged. |
+| **Diff faithful** | `bot.py` +122, `README.md` +35, nothing else. Slice 0 untouched (0 hits for `configure_logging`). It handed me the `AGENTS.md` delta rather than editing it, per the standing rule. |
+| **Live — RUN** | Drove the real `_handle_links` on four messages into **my** test group: **poison + good reel → the reel was delivered** (`sending … as video (1272833 bytes)`) and the handler returned cleanly; poison-only → clean, recorded as *"1 URL(s) found, none on a supported host"*; IPv6-only → clean; control reel → delivered. **Before the fix, the first case killed the whole message.** |
+| **Adversarial** | The agent shipped 7 mutations. **I re-ran the load-bearing one myself** — the guard removed — and it is RED: `ValueError: Invalid IPv6 URL` escapes and the check dies, EXIT=1. My mutation script asserted the file actually changed, which caught my *first* attempt being a no-op. |
+
+### The agent refuted my design, and it was right
+My order recommended guarding `is_supported`, "so every present and future caller inherits it".
+**It does not inherit.** `_handle_links` also asks `_host_is_one_of` about `MEDIA_PLATFORM_HOSTS`
+**directly, on the raw URL list, after** `is_supported` has filtered. So my fix would have delivered the
+good reel and still killed a message whose only URL was unparseable. The guard went into
+`_host_is_one_of`: one host rule, three call sites, 4 functional lines.
+
+### And the defect was bigger than I measured — my own hunt was wrong
+I had recorded *"not reachable through the regex, only through a Telegram entity"*, with the entity half
+unmeasurable. **False.** `URL_PATTERN` accepts any non-space character, so a host containing a **fullwidth
+`#`, `/`, `@` or `:`** comes straight out of plain message text and raises
+`netloc … contains invalid characters under NFKC normalization`. **I verified all four shapes myself
+end-to-end.** My earlier sample tested fullwidth *full stop*, dotless i, punycode, a 300-char host and a
+zero-width space — none of which make an invalid netloc. **I sampled seven candidates and missed the
+family that matters: fullwidth versions of the characters `urlparse` uses as delimiters.** So the defect
+needs no entity, it needs a phone keyboard.
+
+### Slice 2 — the outcome I wanted if it was true: nothing built
+`_deliver` already wraps its whole body in one `try`/`except Exception` that logs, records under its own
+class and apologises, and both calls on the way out are non-raising by contract. The agent drove three
+links with the middle one raising: **the other two delivered, one ledger record, one apology, loop
+unbroken.** A second `try` would add no isolation and only make a failure quieter.
+
+### Three instrument errors of mine on this landing, all the same family
+1. **I read a false RED on the gate.** `EXIT=1` came from piping the self-check through `head -5`, which
+   closes the pipe and kills python with SIGPIPE — reproduced: with `head`, `EXIT=120`; without it,
+   `EXIT=0`. `audit.md` warns that trimming can *hide* a failure; it can also *manufacture* one.
+2. **Two probes that never ran**, earlier the same round: `timeout 40 …` with `2>/dev/null`, where
+   `timeout` does not exist on this Mac — a trap already written in my own exercise contract.
+3. **A vacuous mutation**, caught only because I asserted the file changed.
+**All three were truncation or a missing binary corrupting the measurement. The standing fix: read exit
+status directly, never through a pipe that can close early, and never hide stderr.**
+
+### What the agent found wrong in my order, beyond the design
+`§4.6` is not the link-list section (`§4.11` is), silence-by-default is documented in `§5.4` not `§4.6`,
+`is_supported` calls `urlparse` not `urlsplit`, slice 3 said *"Commit"* while the dispatch said the
+`AGENTS.md` delta must arrive as a diff — and **the CHECKPOINT was still self-contradicting**: its
+"slices 1-3" arm says *"the above, plus…"*, which demands slice 0's evidence from an agent forbidden to
+touch slice 0. **My self-audit fixed the mirror image of that bug and left this one**, which is exactly
+the failure mode `audit.md` describes for editing a shipped order.
