@@ -424,3 +424,24 @@ sees them. Bare `getUpdates` without an `offset` should not confirm anything (co
 `offset = last_update_id + 1`), so my read is that it is safe — **but it is a read, and this is exactly
 the shape of premise that has been wrong before.** It cannot be measured without touching `getUpdates`,
 which is barred while the owner's poller is up. **First action once I have hosting.**
+
+### GOAL hunt log — what I ran while the order-15 agent works
+| What I ran | Predicted | Observed | Where it went |
+|---|---|---|---|
+| Read the launcher's probe verbatim, both platforms | It confirms the backlog and eats it | **`getUpdates?timeout=0&limit=1` on mac, `?timeout=0` on Windows — neither passes `offset`.** Telegram only confirms updates when `offset > update_id`, so a bare probe returns the oldest pending update and **removes nothing.** My read is that criterion 4 is safe. | **Still a read, not a measurement** — see the plan below |
+| Drove the project's own `_deliver` on a real reel into **my** test group, capturing every log record, with `configure_logging()` exactly as `main()` runs it | The slice-0 fix might have silenced delivery lines too — my earlier live test only proved the *startup* lines survived | **`sending …/reel/DbGNFqVKnB-/ as video (1272833 bytes)` survived, and 0 records contained the token.** The video arrived. | **Closed a real hole in my own slice-0 audit**: I had proven the token's absence and the startup lines, never a delivery's lines — and those are what a friend reads when a link misbehaves |
+
+### The one test that proves the premise AND criterion 4 in a single shot
+It needs one human action, because **a bot cannot see its own or another bot's messages** — there is no
+way to create a pending update without a person posting. Sequence, to run once item 3 is merged:
+
+1. I stop my bot → a real gap exists.
+2. **The owner pastes one reel in the group.** (The only step I cannot do; it is physical, not a
+   preference.)
+3. I run the launcher's exact probe, `getUpdates?timeout=0&limit=1` — **the thing under test.**
+4. I start the bot on the merged tip.
+5. **The reel arrives** ⇒ the probe did not eat the backlog *and* criterion 4 is proven. It does not
+   arrive ⇒ the probe consumes, the feature is dead as designed, and item 3 needs the launcher changed
+   instead of `bot.py` — which would be a plan change, logged before anything is re-dispatched.
+
+Deliberately **not** requested yet: asking for the paste before the code is merged wastes it.
