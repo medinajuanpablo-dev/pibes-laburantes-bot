@@ -22,6 +22,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | which links get answered, which get silence, and why "the bot is down" cannot be one of the answers | `README.md` §5.4 ← read before touching `MEDIA_PLATFORM_HOSTS` or `_handle_links` |
 | the insult the bot answers, its two corpora and both thresholds | `README.md` §4.12 ← read before touching `INSULT_WORDS` |
 | the Spanish line each named failure gets, and why three of them hedge | `README.md` §5.2 ← read before touching `FAILURE_SIGNATURES` |
+| why a live stream is refused before a byte, the `was_live` trap, and how the filter fails **open** | `README.md` §4.13 ← read before touching `is_live_stream`, `_refuse_live_stream` or `match_filter` |
 | why a failed link gets a second attempt, which yt-dlp knob does **not** reach it, and what a real outage costs the group in seconds | `README.md` §5.3 ← read before touching the retry, `TRANSPORT_RETRY_PAUSE` or `SOCKET_TIMEOUT` |
 | carousels, albums, `sendMediaGroup`'s limits | `README.md` §4.10 |
 | message entities, the UTF-16 offset trap, why `text_link` is refused | `README.md` §4.11 |
@@ -304,6 +305,21 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   the same record and both catch failures nobody has measured clearing on their own), rewritten
   without its hedge, or losing the "mandámelo de nuevo" that is the only actionable advice in the
   whole table ·
+  `is_live_stream` reading `was_live` (a **finished** stream is an ordinary bounded video and must
+  still be delivered — this is the only mutation that catches it, since the live case passes either
+  way), made constant in **either** direction, or losing either of its two fields ·
+  `match_filter` dropped from `_ydl_options` · `_refuse_live_stream` returning `None` for a live
+  stream, returning yt-dlp's `NO_DEFAULT` (that makes yt-dlp prompt on `input()` with nobody at the
+  terminal — the same unbounded hang in a new costume), or losing its `incomplete` keyword, which
+  makes `_match_entry` retry positionally and **fail open, silently** (verified in
+  `YoutubeDL.py:1626-1630`: `except TypeError: ret = None if incomplete else …`, and the download
+  path always passes a non-empty `incomplete`) ·
+  the live refusal removed from `download_into`, or raised **after** the `path is None` check (it is
+  then misreported as "reported success but left no file") · `LiveStreamError` collapsed into a plain
+  `ExtractionError`, or no longer subclassing it (`_deliver` must still catch it) ·
+  the live reply chosen from the **message** instead of the class, widened to `ExtractionError`,
+  re-added as a `FAILURE_SIGNATURES` row (that re-creates the exact defect the YouTube row was fixed
+  of), or rewritten as a hedge · `_deliver` not passing the exception to `_apologise` ·
   `failure_reply` matching with `any` instead of `all`,
   losing its casefold or its strip · an unrecognised failure returning anything but `FAILURE_REPLY`
   · one of the three hedged replies rewritten as a certainty · a `FAILURE_SIGNATURES` marker
@@ -434,11 +450,17 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   failing YouTube or Facebook link makes no extra request at all. The open question this replaces —
   finding an up-front signal *inside* Instagram — is still closed for the same reason as before
   (`README.md` §4.8): every candidate risks the working image path. Do not re-open it.
-- **Only seven failures are named; everything else is still `no pude bajar ese link`.** That is the
+- **Seven failures are named from a signature, and one from its exception class.** Everything else is
+  still `no pude bajar ese link`. That is the
   design, not a gap. A row costs a measurement against the live site — never a guess from an issue
   tracker or from what an error "probably" says. The sixth is the closest this has come to
   breaking that rule: the owner measured it, the branch that added it could not (`README.md` §5.2).
   The seventh cost nothing to measure: production produced it and the ledger wrote it down.
+  **The live stream is the eighth reply and deliberately NOT a row**: the bot decides that refusal
+  itself off the info dict, so the only string available to key a row on would be the bot's own
+  sentence — which is the defect the deleted-or-private row was fixed of. It is chosen from
+  `LiveStreamError` (`README.md` §4.13 and §5.2), and no `FAILURE_SIGNATURES` row may ever carry its
+  line.
 - **`pool_timeout` is left at its 1.0 s default.** It governs contention for a 256-connection pool
   that a sequential bot never contends for.
 - **PTB processes updates sequentially**, so a slow upload blocks the handler for its duration. The
