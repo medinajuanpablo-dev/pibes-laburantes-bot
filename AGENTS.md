@@ -111,9 +111,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   message bodies" — they are near-copies of `bot` and `estupido` by construction, so they carry
   nothing private, and without them a false positive is indistinguishable from a real insult and no
   threshold could ever be moved on evidence.
-- **`drop_pending_updates=True` is a decision, not a default.** Telegram holds updates ~24 h and
-  every handover follows a gap in which nobody hosted, so replaying the queue dumps the whole gap
-  into the group at once. The accepted cost is that a link posted while the bot was off is lost.
+- **`drop_pending_updates=False` is a decision, not a default.** Telegram holds updates ~24 h and
+  every handover follows a gap in which nobody hosted, so the queue is replayed rather than dropped:
+  a link posted while nobody hosted still arrives. Chosen by the owner 2026-08-10, the burst it was
+  avoiding having measured **7 updates**. Two accepted costs: the arrivals can be hours old, and **a
+  baton pass may repeat the newest link**, because the yielding instance cannot acknowledge its last
+  batch through the same 409 that made it yield. **No age filter, and no de-duplication** — the
+  latter would need `update_id` state persisted across runs, and the owner already killed one
+  in-memory queue for exactly that reason.
 - **A downloaded `.command` cannot be double-clicked, and it takes two independent things to make
   one that can.** It needs the exec bit **and** no `com.apple.quarantine`; a download has neither.
   All four combinations were measured on 2026-08-09 (macOS 15.1.1), along with what Telegram
@@ -292,7 +297,8 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   anything · `stand-ground` said on every conflict, on none, or falling through into the stop ·
   the taking-over side reading the incumbent's line, which tells the person the opposite of what
   they just asked for · the give-up line losing its hedge or its "open this again" way back ·
-  `run_polling` losing `drop_pending_updates` ·
+  `run_polling` dropping the backlog again, or losing `drop_pending_updates` entirely — PTB's default
+  behaves the same, so only the explicit `False` tells the decision from an accident ·
   either `record_rejection` call site in `_deliver` · a ledger write failure escaping · the ledger
   recording the message body · `on_message` not recording an unsupported host at all, recording only
   the first of its URLs, or sharing a real failure's error class · a message with no URL, or a mixed
