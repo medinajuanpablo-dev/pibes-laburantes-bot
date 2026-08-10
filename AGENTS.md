@@ -223,12 +223,15 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   lists the up-front signals and why each risks the working image path. Nothing on the single-image
   fallback path may raise an error of its own; that error would replace the extractor's and the
   ledger would record the fallback's opinion.
-- **A reply may never claim more than its signature carries, and three of the six cannot.**
+- **A reply may never claim more than its signature carries, and three of the seven cannot.**
   Facebook's `Cannot parse data` also fires on a good URL under rate limiting, and YouTube's
   deleted and private are byte-identical, so those replies offer both readings. `README.md` §5.2.
   An unrecognised failure must stay `FAILURE_REPLY` — the feature adds precision where precision
   exists and must never turn an unknown into a guess. The mirror holds too: the bot-check row does
-  **not** hedge, because that signature is not ambiguous.
+  **not** hedge, because that signature is not ambiguous. The DNS row hedges on a different axis —
+  **whose** network — and is the only row that asks for the link again, because it is the only
+  failure measured clearing on its own; its marker is deliberately narrower than the transport
+  failures the retry covers, so a reset connection is retried but not named.
 - **The bot-check row is the one signature nobody on this branch could re-measure**, and its
   markers step around the apostrophe in `you're` on purpose — that character comes from YouTube's
   JSON and a typographic one would kill the row as silently as a capital would. `README.md` §5.2.
@@ -296,6 +299,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   firing more than once, or firing with no pause · `TRANSPORT_RETRY_PAUSE` set to 0 · a transport
   failure reaching the image fallback · the retry note dropped from the ledger's detail, written
   onto a bounce that was never retried, or placed where it breaks `failure_reply`'s match ·
+  the DNS row deleted, widened to `failed to perform` or `caused by transporterror` (both appear in
+  the same record and both catch failures nobody has measured clearing on their own), rewritten
+  without its hedge, or losing the "mandámelo de nuevo" that is the only actionable advice in the
+  whole table ·
   `failure_reply` matching with `any` instead of `all`,
   losing its casefold or its strip · an unrecognised failure returning anything but `FAILURE_REPLY`
   · one of the three hedged replies rewritten as a certainty · a `FAILURE_SIGNATURES` marker
@@ -422,10 +429,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   failing YouTube or Facebook link makes no extra request at all. The open question this replaces —
   finding an up-front signal *inside* Instagram — is still closed for the same reason as before
   (`README.md` §4.8): every candidate risks the working image path. Do not re-open it.
-- **Only six failures are named; everything else is still `no pude bajar ese link`.** That is the
+- **Only seven failures are named; everything else is still `no pude bajar ese link`.** That is the
   design, not a gap. A row costs a measurement against the live site — never a guess from an issue
   tracker or from what an error "probably" says. The sixth is the closest this has come to
   breaking that rule: the owner measured it, the branch that added it could not (`README.md` §5.2).
+  The seventh cost nothing to measure: production produced it and the ledger wrote it down.
 - **`pool_timeout` is left at its 1.0 s default.** It governs contention for a 256-connection pool
   that a sequential bot never contends for.
 - **PTB processes updates sequentially**, so a slow upload blocks the handler for its duration. The

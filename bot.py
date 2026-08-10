@@ -361,6 +361,30 @@ FAILURE_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("[youtube]", "sign in to confirm", "not a bot"),
      "youtube me está bloqueando y no me deja bajar ese video: no es culpa del link, "
      "probá de nuevo más tarde"),
+    # instagram.com/reel/DbqocqEsbVs/ and one more, 2026-08-10: the host's DNS timed
+    # out and two perfectly good reels bounced (README.md §5.3). The only row here
+    # that the bot has already acted on before the group hears it -- by the time this
+    # sentence is chosen, the link has had its second attempt and lost it too.
+    #
+    # THE ONLY ROW WHOSE ADVICE IS "SEND IT AGAIN", which is the whole reason it is
+    # worth a line: every other failure here is a fact about the post, and the friend
+    # can do nothing about any of them. This one clears by itself.
+    #
+    # It hedges on WHOSE network, because that is genuinely unknowable from here: the
+    # host's wifi, the friend's, and the site being unreachable produce the identical
+    # string. Naming one would be the confident lie the Facebook row exists to avoid.
+    #
+    # ONE MARKER, AND THE NARROWEST ONE IN THE MEASURED TEXT. "failed to perform,
+    # curl:" and "(caused by transporterror" both appear in the same record and both
+    # would catch more -- a reset connection, a refused socket -- and neither is
+    # taken, because what was measured clearing on its own inside three minutes is
+    # THIS failure. A different transport failure gets the generic apology, which is
+    # the same fail-safe the rest of this table relies on. The retry in download_into
+    # is keyed on the exception, not on this string, so those failures still get their
+    # second attempt; only the sentence is withheld.
+    (("resolving timed out",),
+     "no pude conectarme para bajar ese link: puede ser mi conexión, la tuya o la del "
+     "sitio. mandámelo de nuevo"),
 )
 
 # Every supported link that does not end in delivered media is written here, one
@@ -2865,6 +2889,15 @@ def _check_failure_replies() -> None:
         "youtube, challenging this address":
             "yt-dlp could not download https://youtube.com/shorts/5kC43KL_mBE: "
             + BOT_CHECK_ERROR,
+        # The 2026-08-10 bounce, and the only detail here that the bot itself has
+        # already added to: a transport failure reaches the group only after the
+        # retry has failed too, so the string this row must match is the one that
+        # carries RETRIED_NOTE. Building it that way rather than from the raw error
+        # is the point -- a note placed where it breaks the match would be invisible
+        # to every other assert in this function.
+        "the network was down, and still down a moment later":
+            "yt-dlp could not download https://www.instagram.com/reel/DbqocqEsbVs/"
+            + RETRIED_NOTE + ": " + DNS_FAILURE_ERROR,
     }
     replies = {label: failure_reply(detail) for label, detail in measured.items()}
     for label, reply in replies.items():
@@ -2890,6 +2923,40 @@ def _check_failure_replies() -> None:
         "throttling is temporary, so the facebook line has to say to retry"
     assert "perfil" in replies["instagram, a profile URL not a post"], replies
     assert "no es público" in replies["instagram, audience-restricted"], replies
+
+    # The fourth hedge is a different KIND of hedge and gets its own asserts. The
+    # other three cannot tell two causes apart; this one cannot tell whose network
+    # broke -- the host's, the friend's, or the site being unreachable all produce
+    # the identical string -- so the reply offers all three and blames none. And it
+    # is the only line in the table that asks for something back, because it is the
+    # only failure that clears on its own.
+    down = replies["the network was down, and still down a moment later"]
+    assert "puede ser" in down, f"it cannot know whose connection it was: {down}"
+    assert "de nuevo" in down, f"the one failure worth resending has to say so: {down}"
+    for blame in ("tu wifi", "tu internet", "tu conexión"):
+        assert blame not in down, f"the friend's network is a guess, not a diagnosis: {down}"
+    # A different transport failure is deliberately NOT this row: it is retried the
+    # same way, but nobody has measured it clearing on its own, so it stays generic.
+    #
+    # THE STRING BELOW IS MEASURED, and it has to be, because the two markers this
+    # row does not use are both inside it. Produced on 2026-08-10 by pointing a real
+    # Instagram extraction at a local listener that accepts and closes the
+    # connection: same call site as the DNS timeout, different curl code. Written
+    # short, it would agree with a widened row by accident and prove nothing --
+    # mutation testing caught exactly that, so the tail stays.
+    reset = (
+        "yt-dlp could not download https://www.instagram.com/reel/DbGNFqVKnB-/ (retried once): "
+        "ERROR: [Instagram] DbGNFqVKnB-: Unable to download webpage: Failed to perform, "
+        "curl: (56) Recv failure: Connection reset by peer. "
+        "See https://curl.se/libcurl/c/libcurl-errors.html first for more details. "
+        "(caused by TransportError('Failed to perform, curl: (56) Recv failure: Connection "
+        "reset by peer. See https://curl.se/libcurl/c/libcurl-errors.html first for more "
+        "details.'))"
+    )
+    assert "failed to perform, curl:" in reset.casefold(), "the wider marker has to really be in here"
+    assert "caused by transporterror" in reset.casefold(), "so does the widest one"
+    assert failure_reply(reset) == FAILURE_REPLY, \
+        "this row is keyed on the failure that was measured, not on curl or transport in general"
 
     # And the mirror image of that rule: a signature that IS unambiguous must not
     # hedge. YouTube says plainly that it wants a login, so "puede que" here would
@@ -3396,6 +3463,9 @@ def _check_transport_failures_are_retried() -> None:
     assert pauses == [TRANSPORT_RETRY_PAUSE], f"exactly one pause, of the documented length: {pauses}"
     assert RETRIED_NOTE in failed, f"the ledger cannot tell a retry happened: {failed}"
     assert "Resolving timed out" in failed, f"the raw failure must survive the note: {failed}"
+    # The note is the bot's words in front of the extractor's, so it sits where it
+    # could break the classification of the very failure it describes. It must not.
+    assert failure_reply(failed) != FAILURE_REPLY, f"the note came between the detail and its row: {failed}"
     # Whoever is watching the window learns it too, and learns it while the link can
     # still be saved -- the ledger record only exists once both attempts are spent.
     assert len(logged) == 1 and reel in logged[0], logged

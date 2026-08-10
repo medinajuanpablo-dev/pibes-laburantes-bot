@@ -887,7 +887,8 @@ The table is data and the matcher is logic — adding a failure is adding a row.
 Every row below is a signature measured by running `download_into` against the live site — **not**
 by reading `yt-dlp --simulate`, because what `download_into` produces is what the bot classifies,
 and only running it proves the two are the same string. Five were measured on 2026-08-09; the sixth
-is marked and explained under the table.
+is marked and explained under the table, and the seventh arrived by itself on 2026-08-10 — the
+ledger recorded it in production, which is the cheapest measurement there is.
 
 | What happened | Matched on | The group hears |
 |---|---|---|
@@ -897,14 +898,32 @@ is marked and explained under the table.
 | Facebook post dead **or** Facebook throttling | `[facebook]` + `cannot parse data` | *…puede que ya no exista o que facebook me esté frenando. probá de nuevo en un rato* |
 | A YouTube video that is deleted **or** private | `[youtube]` + `video unavailable` | *…puede que lo hayan borrado o que sea privado* |
 | YouTube challenging this address † | `[youtube]` + `sign in to confirm` + `not a bot` | *youtube me está bloqueando…: no es culpa del link, probá de nuevo más tarde* |
+| The name would not resolve — twice (§5.3) | `resolving timed out` | *no pude conectarme…: puede ser mi conexión, la tuya o la del sitio. mandámelo de nuevo* |
 
-**Three of those six hedge, and that is the rule, not a hesitation.** Facebook's `Cannot parse
-data` fires on a perfectly good URL under rate limiting — an earlier agent hit exactly that after
-five self-checks in 25 minutes — so "ese post no existe" would be a confident lie about half the
-time. YouTube cannot distinguish deleted from private: `watch?v=AAAAAAAAAAA` and `?v=ZZZZZZZZZZZ`
-produce byte-identical text. A reply may never claim more than its signature carries.
+**Three of those seven hedge on the cause, and that is the rule, not a hesitation.** Facebook's
+`Cannot parse data` fires on a perfectly good URL under rate limiting — an earlier agent hit exactly
+that after five self-checks in 25 minutes — so "ese post no existe" would be a confident lie about
+half the time. YouTube cannot distinguish deleted from private: `watch?v=AAAAAAAAAAA` and
+`?v=ZZZZZZZZZZZ` produce byte-identical text. A reply may never claim more than its signature
+carries.
 
-**The last row is the mirror of that rule and the one exception to the measurement rule.** It does
+**The last row hedges on something else — whose network it was** — and it is the only row in the
+table whose advice the friend can act on in the next ten seconds. The host's wifi, the friend's,
+and the site being unreachable produce the identical string, so it offers all three and blames
+none; and because that failure is the only one measured clearing on its own, it is the only one
+that asks for the link again. It is also the only row the group reaches **after** the bot has
+already tried twice (§5.3), which is why the ledger detail it must keep matching carries
+`(retried once)` in front of the extractor's text.
+
+Its marker is one word narrower than it could be, on purpose. `failed to perform, curl:` and
+`(caused by transporterror` are both in the same record and both would catch a reset connection or
+a refused socket as well — neither is used, because what was measured clearing by itself is *this*
+failure. Those other transport failures still get their second attempt (the retry reads the
+exception, not this string); they just fall through to the generic apology instead of being told
+something nobody has verified.
+
+**The bot-check row (†) is the mirror of that rule and the one exception to the measurement
+rule.** It does
 *not* hedge, because the signature does not: YouTube says plainly that it wants a login, so the
 group is told the one thing it can act on — the link is fine, the bot is blocked. The **operator**
 action lives in §5 item 4 and in `YTDLP_COOKIES`, not in a sentence written for a friend.
@@ -1033,7 +1052,7 @@ a preference.
 | An Instagram throwaway account and cookies | Unnecessary — anonymous extraction works (§4.7). |
 | Syncing the rejected-links ledger between hosts | It fragments by design (§5.1). A server or a shared database for ~20 links a week is exactly the cost this repo refuses; `cat` merges the files when the owner actually wants them merged. |
 | Playlists, channels, a dashboard, accounts, rate limiting | Out of scope, permanently. |
-| A retry loop or a global PTB error handler | The failure path is local and small on purpose (§4.6). |
+| A retry **loop**, exponential backoff, jitter, or any retry library | A transport failure buys exactly one more attempt and everything else buys none (§5.3). The evidence is a blip that cleared inside three minutes: a schedule of attempts would only make the group wait longer for the same apology. The failure path stays local and small on purpose (§4.6). |
 | A second Python file | See DESIGN LAW 1 in `AGENTS.md`. |
 
 ---
