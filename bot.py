@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import difflib
+import html
 import io
 import json
 import logging
@@ -453,6 +454,67 @@ INSULT_MAX_GAP = 1
 # mean anything; an insult record is a date, so `cat insults.jsonl` and `wc -l` are
 # the whole report. Add one when there is something to group.
 INSULT_LEDGER = Path(__file__).resolve().parent / "insults.jsonl"
+
+# --- The bot handing out its own installer --------------------------------------
+#
+# What a friend gets when they ask the bot how to run it. It is a MESSAGE and not a
+# file attachment, and that is forced, not chosen. A launcher on its own is inert --
+# run-bot.command's first act is `git pull` in a directory with no .git and its last
+# is `exec .venv/bin/python bot.py` with no bot.py next to it -- and a file that
+# arrives over the network carries com.apple.quarantine, which is exactly what
+# LaunchServices refuses, while a file written by git does not (README.md 2.1).
+#
+# So the thing worth sending is the one command that creates a real clone. That is
+# also the only shape that satisfies what the owner asked for in the same breath --
+# that it stay updated forever -- because both launchers run `git pull --ff-only` on
+# startup: a clone is a subscription, an archive is a snapshot that rots.
+
+# ponytail: hardcoded rather than read from `git remote get-url origin`. Deriving it
+# would put a subprocess on a path anyone who can message the bot can trigger, and it
+# would hand friends whatever that host's remote happens to be: an SSH remote
+# (git@github.com:...) is useless to a friend with no GitHub account, and a copy with
+# no .git -- or a machine with no git, which the launchers tolerate -- would have
+# nothing to give at all. The ceiling is that this string goes stale if the
+# repository ever moves. It cannot go stale *silently*: the self-check pins it
+# against this checkout's own origin. Upgrade path if the repo does move: change it
+# here and in EMPEZAR-ACA.md, which is the other place a human reads it.
+CLONE_URL = "https://github.com/medinajuanpablo-dev/pibes-laburantes-bot.git"
+
+# The folder `git clone` makes. Derived so it can never disagree with the URL above.
+CLONE_DIR = CLONE_URL.rsplit("/", 1)[-1].removesuffix(".git")
+
+# Where the clone lands. `mkdir -p` first because this line is also pasted into Git
+# Bash on Windows, where ~/Documents is not guaranteed to exist -- and a `cd` into a
+# missing folder would abort the whole chain before it cloned anything. On macOS the
+# folder is always there and the mkdir does nothing.
+CLONE_PARENT = "~/Documents"
+
+INSTALL_COMMAND = "instalar"
+
+# The launcher each platform ends at. The pasted line opens it directly instead of
+# stopping at the folder: the friend is already in a terminal at that point, and the
+# alternative -- "now go find the file and double-click it" -- is the step where
+# somebody gets lost.
+LAUNCHER_FILE = {"mac": "run-bot.command", "windows": "run-bot.cmd"}
+
+# Spoken names, so the reply never has to hardcode a platform's label twice.
+PLATFORM_NAMES = {"mac": "Mac", "windows": "Windows"}
+
+# How somebody might name their platform. Generous on purpose and consulted for every
+# word after the command, because the alternative to recognising "en windows" is an
+# error message, and this reply is the one thing a lost friend has.
+PLATFORM_WORDS = {
+    "mac": "mac",
+    "macos": "mac",
+    "osx": "mac",
+    "apple": "mac",
+    "macbook": "mac",
+    "imac": "mac",
+    "windows": "windows",
+    "win": "windows",
+    "pc": "windows",
+    "microsoft": "windows",
+}
 
 # `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
 # tests Update.effective_message, which resolves to `edited_message` when that is
@@ -1335,6 +1397,85 @@ def album_truncation_note(total: int, sent: int) -> str:
     )
 
 
+def install_platform(text: str | None) -> str | None:
+    """Which platform "/instalar algo" asked for, or None meaning both.
+
+    Every word after the command is looked at, not only the first, so "en windows"
+    and "para mac" work. The first recognised one wins.
+
+    Nothing here can fail. A bare command, a typo, a word nobody anticipated -- all
+    of them mean both platforms, because the person reading this reply is the person
+    who has no idea how any of it works, and an error message would be the worst
+    possible answer to the only question they know how to ask.
+    """
+    parts = (text or "").split(None, 1)
+    after_command = parts[1] if len(parts) > 1 else ""
+    for word in re.split(r"[^a-z]+", after_command.casefold()):
+        platform = PLATFORM_WORDS.get(word)
+        if platform:
+            return platform
+    return None
+
+
+def install_command_line(platform: str) -> str:
+    """The single line the friend pastes, as plain text. The caller escapes it.
+
+    One line rather than a numbered list of four, because it is copied by tapping a
+    block, not read: clone, enter the folder, open the launcher. `&&` and not `;` so
+    a failing clone stops instead of running the launcher in the wrong directory.
+    """
+    return (
+        f"mkdir -p {CLONE_PARENT} && cd {CLONE_PARENT} && git clone {CLONE_URL} "
+        f"&& cd {CLONE_DIR} && ./{LAUNCHER_FILE[platform]}"
+    )
+
+
+def _install_block(platform: str) -> str:
+    """One platform's half of the reply, in Spanish, as Telegram HTML."""
+    name = html.escape(PLATFORM_NAMES[platform])
+    launcher = html.escape(LAUNCHER_FILE[platform])
+    command = html.escape(install_command_line(platform))
+    if platform == "mac":
+        intro = (
+            "Abrí la app Terminal (Cmd+Espacio, escribí Terminal, Enter), "
+            "pegá esto y apretá Enter:"
+        )
+    else:
+        intro = "Abrí Git Bash, pegá esto y apretá Enter:"
+    return (
+        f"<b>En {name}</b>\n"
+        f"{intro}\n\n"
+        f"<pre>{command}</pre>\n\n"
+        f"De ahí en adelante es doble clic en {launcher}, y se actualiza solo."
+    )
+
+
+def install_reply(platform: str | None = None) -> str:
+    """The install instructions the bot hands out, in Spanish, as Telegram HTML.
+
+    Pure: it reads no environment, no file and no subprocess, so nothing the process
+    is holding can reach the text by any path.
+
+    `platform` None means both blocks, and that is the common case rather than the
+    fallback: a tap on Telegram's command menu sends the bare command with no
+    argument at all, and this audience taps.
+
+    HTML and not MarkdownV2: the only thing that needs markup is the code block, and
+    MarkdownV2 would demand escaping . - ( ) ! and a dozen more characters in every
+    Spanish sentence here, which is a standing trap for whoever writes the next line
+    of copy. HTML needs & < > and nothing else, so every interpolated value goes
+    through html.escape -- the `&&` in the pasted command is the one that bites.
+    """
+    platforms = (platform,) if platform else ("mac", "windows")
+    parts = [
+        "Así se prende el bot en tu compu. Es una sola vez; después es doble clic.",
+        *(_install_block(each) for each in platforms),
+    ]
+    if platform is None:
+        parts.append(f"Si querés solo el tuyo: /{INSTALL_COMMAND} mac o /{INSTALL_COMMAND} windows")
+    return "\n\n".join(parts)
+
+
 def take_over_requested(argv: Sequence[str]) -> bool:
     """True when this instance was started to take the bot away from somebody else.
 
@@ -1622,7 +1763,29 @@ def print_rejections() -> None:
 async def on_start(update: telegram.Update, _context: object) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text("mandá un link de YouTube, Instagram o Facebook y te lo bajo")
+        await message.reply_text(
+            f"mandá un link de YouTube, Instagram o Facebook y te lo bajo.\n"
+            f"Para prenderlo en tu compu: /{INSTALL_COMMAND}"
+        )
+
+
+async def on_install(update: telegram.Update, _context: object) -> None:
+    """Hand out the install instructions. Works in a group and in a DM alike.
+
+    The argument is read off the message text rather than out of PTB's context, so
+    the whole path from what the friend typed to what is sent is reachable from a
+    plain Message and the self-check drives all of it.
+
+    Nothing here reads the environment. That is the point -- see install_reply.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    await _reply_text(
+        message,
+        install_reply(install_platform(getattr(message, "text", None))),
+        parse_mode=telegram.constants.ParseMode.HTML,
+    )
 
 
 async def on_message(update: telegram.Update, _context: object) -> None:
@@ -1869,10 +2032,21 @@ async def _deliver(message: telegram.Message, url: str) -> None:
         await _apologise(message, detail)
 
 
-async def _reply_text(message: telegram.Message, text: str) -> None:
-    """Send a short text reply with timeouts of its own. May raise."""
+async def _reply_text(
+    message: telegram.Message, text: str, parse_mode: str | None = None
+) -> None:
+    """Send a short text reply with timeouts of its own. May raise.
+
+    `parse_mode` defaults to None and every caller but one leaves it there. That
+    default is load-bearing: the apology, the oversize reply and the insult answer
+    are plain Spanish that nobody escapes, and one of them carries a raw URL. Turning
+    markup on for all of them -- or configuring a PTB `Defaults` object, which would
+    do it invisibly -- would make an unescaped character in a future line either
+    vanish from the message or fail the send outright.
+    """
     await message.reply_text(
         text,
+        parse_mode=parse_mode,
         connect_timeout=CONNECT_TIMEOUT,
         write_timeout=TEXT_REPLY_TIMEOUT,
         read_timeout=TEXT_REPLY_TIMEOUT,
@@ -1956,13 +2130,43 @@ async def _send_album(message: telegram.Message, paths: Sequence[Path]) -> None:
         )
 
 
+BOT_COMMANDS = (
+    ("start", "Qué hace el bot"),
+    (INSTALL_COMMAND, "Cómo prenderlo en tu compu (Mac o Windows)"),
+)
+
+
+async def _publish_commands(app: Application) -> None:
+    """Put the commands in Telegram's menu, so the friend can find them by tapping.
+
+    Called by PTB after start-up, once per run. It is a global bot setting rather
+    than a per-instance one, so every host re-declares the same list and the last one
+    wins -- idempotent, and it means the menu cannot drift from this file no matter
+    who is hosting or what anybody typed into BotFather once.
+
+    The fourth place in this file that swallows an exception, and it is here for the
+    same reason as _apologise: a convenience must never cost the group its bot. A
+    post_init callback that raises aborts run_polling, so without this a transient
+    network blip while publishing a *menu* would end with a friend staring at a
+    traceback in a window they cannot read, and no bot running. Narrow on purpose --
+    only Telegram's own error class, so a real bug in the list above still shouts.
+    """
+    try:
+        await app.bot.set_my_commands(
+            [telegram.BotCommand(command, description) for command, description in BOT_COMMANDS]
+        )
+    except telegram.error.TelegramError:
+        log.warning("could not publish the command menu; the bot works, the menu may be stale")
+
+
 def build_application(token: str) -> Application:
     """Wire the handlers onto an Application. Separate from main() so the self-check
     can assert the wiring: a handler that exists but was never registered is the one
     failure this file cannot see from the outside, and forgetting add_error_handler
     would silently restore the wall of tracebacks. Builds nothing over the network."""
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_publish_commands).build()
     app.add_handler(CommandHandler("start", on_start))
+    app.add_handler(CommandHandler(INSTALL_COMMAND, on_install))
     app.add_handler(MessageHandler(MESSAGE_FILTER, on_message))
     app.add_error_handler(on_error)
     return app
@@ -3055,6 +3259,11 @@ def _check_send_timeouts() -> None:
     asyncio.run(_reply_text(text, "hola"))
     assert text.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, text.kwargs
     assert text.kwargs.get("write_timeout") == TEXT_REPLY_TIMEOUT, text.kwargs
+    # And no markup, for every reply but the one that asked for it. The apology, the
+    # oversize line and the insult answer are unescaped Spanish -- one of them
+    # carrying a raw URL -- so a parse mode leaking onto this default would either
+    # eat characters or fail the send.
+    assert text.kwargs.get("parse_mode") is None, text.kwargs
 
     with temp_workspace() as workspace:
         slides = []
@@ -3934,6 +4143,175 @@ def _check_startup_drops_the_backlog() -> None:
     print("ok  startup drops the backlog instead of flooding the group")
 
 
+# The only markup this reply is allowed to contain. Anything else means an unescaped
+# character reached the text, which Telegram answers with a 400 the group never sees.
+ALLOWED_HTML = re.compile(r"</?(?:b|pre)>")
+
+
+class _InstallMessage:
+    """A message that records what was replied to it. Enough for on_install."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.sent: str | None = None
+        self.kwargs: dict = {}
+
+    async def reply_text(self, text: str, **kwargs: object) -> None:
+        self.sent = text
+        self.kwargs = kwargs
+
+
+class _InstallUpdate:
+    def __init__(self, message: object) -> None:
+        self.effective_message = message
+
+
+def _install_texts() -> dict[str, str]:
+    """Every string this feature can put in a chat, keyed by how it got there.
+
+    Both the builder and the handler, because they are two different chances to
+    leak: the builder could interpolate a secret and the handler could append one.
+    """
+    texts = {f"install_reply({platform!r})": install_reply(platform) for platform in (None, "mac", "windows")}
+    # The group form and the DM form. In a group Telegram delivers the command with
+    # the bot's username glued on, which is the only real difference between the two
+    # and the one thing that could make this work in a DM and not where it matters.
+    for label, typed in (
+        ("DM, bare", f"/{INSTALL_COMMAND}"),
+        ("DM, mac", f"/{INSTALL_COMMAND} mac"),
+        ("group, bare", f"/{INSTALL_COMMAND}@pibes_laburantes_bot"),
+        ("group, windows", f"/{INSTALL_COMMAND}@pibes_laburantes_bot windows"),
+    ):
+        message = _InstallMessage(typed)
+        asyncio.run(on_install(_InstallUpdate(message), None))
+        assert message.sent is not None, f"{label}: the bot answered nothing"
+        assert message.kwargs.get("parse_mode") == telegram.constants.ParseMode.HTML, (
+            f"{label}: without HTML the code block is not a code block and nothing "
+            f"offers tap-to-copy: {message.kwargs}"
+        )
+        assert message.kwargs.get("connect_timeout") == CONNECT_TIMEOUT, message.kwargs
+        texts[f"on_install({label})"] = message.sent
+    return texts
+
+
+def _check_install_instructions() -> None:
+    """The command exists, understands what was asked of it, and can be found.
+
+    Everything but the network: which platform a phrase means, what the reply carries
+    for each one, that it goes out as HTML so the block is a block, and that both the
+    handler and the command menu are actually wired -- a command nobody registered
+    and a command nobody can see are the two ways this ships as nothing.
+
+    The group form matters as much as the DM one: in a group Telegram delivers
+    "/instalar@thebot mac", and reading the argument off the wrong end of that is a
+    defect that only shows up where the friends actually are.
+    """
+    # --- what "/instalar algo" means ---------------------------------------------
+    assert install_platform(f"/{INSTALL_COMMAND}") is None, "bare must mean both, never an error"
+    assert install_platform(None) is None, "a message with no text is still not an error"
+    assert install_platform(f"/{INSTALL_COMMAND}@pibes_laburantes_bot") is None, "group form, bare"
+    for said in ("mac", "Mac", "MAC", "macos", "macOS", "para mac", "en mi macbook", "osx"):
+        assert install_platform(f"/{INSTALL_COMMAND} {said}") == "mac", said
+    for said in ("windows", "Windows", "win", "pc", "en windows", "windows 11"):
+        assert install_platform(f"/{INSTALL_COMMAND} {said}") == "windows", said
+    # Unrecognised is both, not an error and not silence: the person asking this is
+    # the person who does not know the words.
+    for said in ("linux", "asdfgh", "?", "ayuda", "no se"):
+        assert install_platform(f"/{INSTALL_COMMAND} {said}") is None, said
+    # The command word itself must never be read as a platform, or "/pc" style typos
+    # in the command would pick a side at random.
+    assert install_platform("/mac") is None, "the command word is not an argument"
+
+    # --- what the reply carries ---------------------------------------------------
+    both = install_reply()
+    mac = install_reply("mac")
+    windows = install_reply("windows")
+    assert both == install_reply(None), "the bare default must be the both-platforms reply"
+
+    for label, text, wanted, unwanted in (
+        ("mac", mac, LAUNCHER_FILE["mac"], LAUNCHER_FILE["windows"]),
+        ("windows", windows, LAUNCHER_FILE["windows"], LAUNCHER_FILE["mac"]),
+    ):
+        assert wanted in text, f"{label} must name its own launcher"
+        assert unwanted not in text, f"{label} must not name the other platform's launcher"
+        assert f"./{wanted}" in text, f"{label} must actually open the launcher, not stop at the folder"
+    assert LAUNCHER_FILE["mac"] in both and LAUNCHER_FILE["windows"] in both, (
+        "the bare reply is what a tap on the command menu sends, so it serves both"
+    )
+    assert f"/{INSTALL_COMMAND} mac" in both, "the bare reply must offer the narrower one"
+    assert f"/{INSTALL_COMMAND} mac" not in mac, "a reply about one platform must not offer itself"
+
+    for label, text in (("mac", mac), ("windows", windows), ("both", both)):
+        assert CLONE_URL in text, f"{label}: no clone URL is no instructions at all"
+        assert f"cd {CLONE_DIR} " in text, f"{label}: the friend has to cd into the folder git made"
+        block = re.search(r"<pre>(.*?)</pre>", text, re.DOTALL)
+        assert block and CLONE_URL in block.group(1), (
+            f"{label}: the pasteable part must be inside the code block or nothing offers to copy it"
+        )
+        # Escaping, which is the trap that comes with introducing a parse mode. The
+        # && in the pasted command is the character that bites: raw, Telegram may
+        # swallow it or reject the message.
+        assert "&amp;&amp;" in text, f"{label}: the shell && must be HTML-escaped"
+        assert "&&" not in text, f"{label}: a raw && survived escaping"
+        stripped = ALLOWED_HTML.sub("", text)
+        assert "<" not in stripped and ">" not in stripped, (
+            f"{label}: a stray angle bracket is an unsupported tag and a 400 from Telegram"
+        )
+        assert re.search(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", stripped) is None, (
+            f"{label}: a bare & is not a valid HTML entity"
+        )
+        assert len(text) <= int(telegram.constants.MessageLimit.MAX_TEXT_LENGTH), (
+            f"{label}: {len(text)} characters, over Telegram's ceiling -- the send would 400"
+        )
+
+    # --- the reply really is what the handler sends --------------------------------
+    # Both forms of the command, driven through on_install rather than through the
+    # builder alone: parse mode and timeouts live on the handler's send, not here.
+    _install_texts()
+
+    # --- the command exists, and Telegram is told it exists ------------------------
+    wired = build_application("123456:AAHnot-a-real-token-nothing-is-sent")
+    handlers = [h for group in wired.handlers.values() for h in group]
+    installed = [
+        h for h in handlers
+        if isinstance(h, CommandHandler) and INSTALL_COMMAND in h.commands
+    ]
+    assert len(installed) == 1, f"/{INSTALL_COMMAND} must be registered exactly once: {handlers}"
+    assert installed[0].callback is on_install, installed[0].callback
+    assert wired.post_init is _publish_commands, (
+        "nobody discovers a command that is not in Telegram's menu"
+    )
+
+    class MenuBot:
+        def __init__(self, blow_up: bool = False) -> None:
+            self.published: list = []
+            self.blow_up = blow_up
+
+        async def set_my_commands(self, commands: list) -> None:
+            if self.blow_up:
+                raise telegram.error.TimedOut
+            self.published = commands
+
+    class MenuApplication:
+        def __init__(self, bot: object) -> None:
+            self.bot = bot
+
+    menu = MenuBot()
+    asyncio.run(_publish_commands(MenuApplication(menu)))
+    published = {command.command: command.description for command in menu.published}
+    assert INSTALL_COMMAND in published, published
+    assert published[INSTALL_COMMAND].strip(), "an empty description is refused by Telegram"
+    assert "start" in published, "publishing a menu must not hide the command that already existed"
+
+    # A menu that will not publish must not cost the group its bot: post_init raising
+    # aborts run_polling, and the person at the window cannot read a traceback.
+    with _capture_log(logging.WARNING) as warnings:
+        asyncio.run(_publish_commands(MenuApplication(MenuBot(blow_up=True))))
+    assert len(warnings) == 1 and "menu" in warnings[0], warnings
+
+    print("ok  the bot hands out its own installer, per platform, and Telegram lists it")
+
+
 def _self_check() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
     _check_pure_helpers()
@@ -3950,6 +4328,7 @@ def _self_check() -> None:
     _check_take_over_intent()
     _check_conflict_handling()
     _check_startup_drops_the_backlog()
+    _check_install_instructions()
     _check_extraction()
     print("\nself-check passed")
 

@@ -11,6 +11,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 |---|---|
 | what it does, how to run it, the architecture | `README.md` §1–§2 |
 | the launchers, the baton pass, one-poller-per-token | `README.md` §2.1 and §4.9 |
+| `/instalar`, why it is a message and not a file, the one parse mode in this file | `README.md` §2.2 ← read before touching `install_reply` |
 | how the owner ships a change, bumps a pin, sets up a new host | `docs/updating.md` |
 | what a friend hosting the bot is told (Spanish, product copy) | `EMPEZAR-ACA.md` |
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
@@ -109,7 +110,22 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   into the group at once. The accepted cost is that a link posted while the bot was off is lost.
 - **A file written by `git` carries no `com.apple.quarantine`; a downloaded one does.** That is the
   entire reason distribution is `git clone` rather than a zip: a quarantined `.command` is refused
-  by LaunchServices and never runs. It is also why the launcher can update itself.
+  by LaunchServices and never runs. It is also why the launcher can update itself. It is also why
+  `/instalar` hands out a **command** and never the launcher as an attachment (`README.md` §2.2) —
+  and a launcher on its own is inert anyway: its first act is `git pull` in a directory with no
+  `.git`.
+- **Exactly one reply in this file sets a `parse_mode`, and `_reply_text`'s default must stay
+  `None`.** `/instalar` needs HTML for its code block, which is what makes Telegram offer
+  tap-to-copy. Every other reply — the apology, the oversize line with a raw URL in it, the insult
+  answer — is unescaped Spanish written by whoever last edited the copy. Turning markup on for all
+  of them, or configuring a PTB `Defaults` object, would make the next stray character either vanish
+  from the message or fail the send. Inside `/instalar`, every interpolated value goes through
+  `html.escape`; the `&&` in the pasted command is the one that bites.
+- **`_publish_commands` is the fourth place in this file that swallows an exception**, and it is the
+  only one that is not on the delivery path. A `post_init` callback that raises aborts
+  `run_polling`, so a network blip while publishing a *menu* would leave a friend staring at a
+  traceback with no bot running. It catches `telegram.error.TelegramError` and nothing wider, so a
+  real bug in the command list still shouts.
 - **An image post's thumbnails carry no dimensions, and the list is not sorted worst-to-best.** A
   reel's thumbnails *do* carry width/height, which makes the wrong assumption easy. Selection is by
   downloaded file size for that reason. Also: `duration` and `title` discriminate image from video
@@ -229,7 +245,14 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   **dead** entry that would not have matched anyway ·
   the accents, the casefold or the run-collapsing dropped from `insult_tokens` · the insult
   half reading `text` but not `caption` · the record or the log line carrying the message body ·
-  an insult write failure escaping · insults written into `rejected.jsonl`.
+  an insult write failure escaping · insults written into `rejected.jsonl` ·
+  `/instalar` not registered as a handler · `post_init` not wired, so the command menu is never
+  published · `_publish_commands` letting a failed publish escape (that aborts `run_polling`) or
+  dropping `start` from the list · `on_install` losing its `parse_mode`, or HTML becoming
+  `_reply_text`'s default · `html.escape` dropped from the pasted command, so a raw `&&` reaches
+  Telegram · a bare `/instalar` picking one platform instead of serving both · an unrecognised word
+  erroring instead of meaning both · either platform's block naming the other's launcher, or the
+  pasted command stopping at the folder instead of opening the launcher.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.

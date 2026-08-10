@@ -22,6 +22,12 @@ Long-polling client, not a server. No inbound port, no webhook, no TLS to manage
 
 ```
 Telegram update
+  ├─ /start                      what the bot does, and a pointer to /instalar
+  ├─ /instalar [mac|windows]     how to host it, as a message — §2.2
+  │   ├─ install_platform(text)      which platform was asked for; nothing sensible
+  │   │                              recognised means both, never an error
+  │   └─ install_reply(platform)     Spanish, Telegram HTML, one code block each
+  │
   └─ on_message                  filters: real messages only, text or caption
      │
      ├─ _handle_links(message)   FIRST, because _deliver cannot raise
@@ -81,6 +87,7 @@ token.** That is what makes the self-check possible.
 | `oversize_reply(bytes, link)` | the Spanish fallback message |
 | `album_truncation_note(total, sent)` | the Spanish warning for a carousel longer than one album |
 | `rejection_record(...)` / `format_rejections(records)` | one ledger line, and the grouped report — §5.1 |
+| `install_platform(text)` / `install_reply(platform)` | which platform "/instalar algo" meant, and the instructions for it — §2.2 |
 | `take_over_requested(argv)` | whether this instance was told to take the bot from somebody else — §4.9 |
 | `conflict_action(now, started, last, take_over_until)` | `announce` · `take-over` · `quiet` · `stand-ground` · `give-up` for a poll conflict — §2.1 |
 
@@ -147,6 +154,40 @@ Three things follow from the design and are not obvious:
 
 The owner's workflow is `docs/updating.md`. Nothing else here changes: `python bot.py` above is
 still the way the owner runs it, and the launcher is a convenience wrapped around exactly that.
+
+### 2.2 The bot hands out its own installer
+
+`/instalar` replies with the one line a friend pastes to become a host. It works in the group and
+in a DM, and Telegram lists it in the command menu, so nobody has to be told it exists.
+
+**It is a message, not a file, and that is forced rather than chosen.** Two facts already measured
+here rule out sending the launcher as an attachment:
+
+- **A launcher on its own is inert.** `run-bot.command`'s first act is `git pull` in a directory
+  with no `.git`, and its last is `exec .venv/bin/python bot.py` with no `bot.py` beside it. It also
+  needs `requirements.txt`.
+- **A downloaded file is quarantined; a git-written one is not** (§2.1). A quarantined `.command` is
+  refused by LaunchServices and never runs.
+
+Shipping the whole repository as an archive fails for a third reason: with no `.git` it can never
+`git pull`, so it is a snapshot that rots — the opposite of what this is for. The one command that
+creates a real clone travels as text, so nothing is quarantined, and it lands the friend in a
+working copy whose launcher pulls on every startup. **That is what keeps every friend current: the
+owner pushes, and the next double-click has it.**
+
+`mac` and `windows` are the arguments, and **bare is the common case, not the fallback** — a tap on
+the command menu sends `/instalar` with nothing after it, and this audience taps. Bare answers with
+both platforms; so does anything unrecognised, because the person asking is the person who does not
+know the words and an error message would be the worst possible reply. Every word after the command
+is looked at, so `en windows` and `para mac` work.
+
+The reply is the only place in `bot.py` that sets a `parse_mode`, and it is `HTML`. The code block
+is what makes Telegram offer tap-to-copy; MarkdownV2 would have meant escaping `.` `-` `(` `)` `!`
+in every Spanish sentence, a standing trap for the next line of copy, while HTML needs `&` `<` `>`
+and nothing else. Everything interpolated goes through `html.escape` — the `&&` in the pasted
+command is the one that bites. **`_reply_text` still defaults to no parse mode**, and that default
+is load-bearing: the apology, the oversize line and the insult answer are unescaped Spanish, one of
+them carrying a raw URL.
 
 ### Self-check
 
