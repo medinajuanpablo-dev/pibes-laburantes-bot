@@ -2681,13 +2681,19 @@ def main() -> None:
     # last night's links. No age filter: it would reintroduce exactly the loss above to
     # avoid a burst that was never big enough to matter.
     #
-    # One interaction with the baton pass (README.md §2.1), mechanical but NOT measured
-    # here -- this file's checks have no live surface: python-telegram-bot tells Telegram
-    # its offset only on the NEXT getUpdates, and the one extra getUpdates it makes while
-    # shutting down meets the same 409 that made this instance yield. So the batch the
-    # yielding incumbent fetched last can still be pending, and the instance taking the
-    # baton re-delivers it: a handover may repeat the newest link or two. Dropping the
-    # queue used to hide that. De-duplicating updates is not built and was not asked for.
+    # One interaction with the baton pass (README.md §2.1) was argued and then REFUTED by
+    # measurement -- written down rather than deleted, so nobody re-derives it: a handover
+    # does NOT repeat the newest link. The plausible argument was that python-telegram-bot
+    # sends its offset only on the NEXT getUpdates, so the one extra getUpdates it makes
+    # while shutting down would meet the same 409 that made this instance yield, leaving
+    # its last batch pending for the taker to re-deliver. Measured 2026-08-10 with a real
+    # taker polling the same token, alive before and after: that call answers HTTP 200,
+    # ok:true. The 409 hits whichever poll is DISPLACED, not the instance that already saw
+    # one -- and PTB's shutdown call passes timeout=0, so it displaces the taker and
+    # returns before anything can displace it. Same mechanism that lets the launcher's own
+    # probe steal a live poll (README.md §4.9). Second, independent signal: the yielding
+    # side logs no PTB "updates may be fetched again" warning, the line it emits when that
+    # cleanup fails. De-duplicating updates is not built and was not asked for.
     app.run_polling(drop_pending_updates=False)
 
 
