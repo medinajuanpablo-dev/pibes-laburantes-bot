@@ -308,8 +308,15 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   Windows reply's link contains `raw.githubusercontent.com`. · the Windows reply losing its download
   link, putting it inside a `<pre>` (a URL in a code block is not tappable), naming `run-bot.cmd`
   instead of the bootstrap (that copy would run and never update again), or going back to demanding
-  git · `instalar-bot.cmd` fetching a different repository than `CLONE_URL`, or dropping the
-  `--exclude` that keeps it out of its own unpack · **a line added to the reply, or one removed** —
+  git · `instalar-bot.cmd` fetching a different repository than `CLONE_URL`, dropping the
+  `--exclude` that keeps it out of its own unpack, or not writing the `.tarball-install` stamp ·
+  `run-bot.cmd` not reading that stamp, keying on some other file, not naming `instalar-bot.cmd` in
+  the sentence it prints, or **losing the "no se puede actualizar sola" line**, which is still true
+  of a hand-unpacked zip · an accent or `ñ` added to either `.cmd` (cmd.exe reads them in the OEM
+  codepage, so it is mojibake in the window a friend is reading) · note that asserting a name is
+  *somewhere* in a `.cmd` is **vacuous**: both files carry both names in their comments, so the stamp
+  checks pin the redirection that writes it, the `if exist` that reads it, and the `echo ` lines a
+  friend actually sees · **a line added to the reply, or one removed** —
   the budget is three lines per platform and five bare, and it is asserted exactly, because the defect
   it replaced was a 22-line wall nobody read to the end of.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image

@@ -32,10 +32,22 @@ echo the-bot
 echo -------
 
 rem --- 1. Updates ---------------------------------------------------------------
-rem Distribution is `git clone`, so the update channel is `git pull`: the owner
-rem pushes and every friend gets it on their next double-click. Never fatal.
+rem A clone's update channel is `git pull`: the owner pushes and every friend gets
+rem it on their next double-click. Never fatal.
 rem GIT_TERMINAL_PROMPT=0 keeps a remote that wants credentials from hanging on a
 rem prompt in a window nobody is reading.
+rem
+rem There is a second kind of copy now and it has no .git at all: the one
+rem instalar-bot.cmd downloaded and unpacked, which updates by re-fetching the
+rem tarball every time that file is opened. For that copy the old sentence here was
+rem simply false -- it has an updater, it just is not git -- and the difference is
+rem not visible from anything git can be asked, because both copies answer `no .git`
+rem identically. The .tarball-install stamp the bootstrap leaves is the whole signal,
+rem and this file only ever reads it. Note what the friendly branch deliberately does
+rem NOT say: not `ya tenes la ultima version`. Opening this file directly does no
+rem update at all, so it names the file that does one instead of claiming freshness
+rem it cannot check. A hand-unpacked zip has neither .git nor the stamp and keeps the
+rem old sentence, which is true of it.
 echo Buscando actualizaciones...
 if not exist ".git" goto :nogit
 where git >nul 2>&1 || goto :nogit
@@ -50,7 +62,11 @@ goto :python
 echo No pude buscar actualizaciones; sigo con la version que ya tenias.
 goto :python
 :nogit
+if exist ".tarball-install" goto :installercopy
 echo Esta copia no se puede actualizar sola. Pedile al dueno el link para bajarla con git.
+goto :python
+:installercopy
+echo Esta copia se actualiza abriendo instalar-bot.cmd, el archivo que bajaste. Este de aca solo la prende.
 
 rem --- 2. Python ----------------------------------------------------------------
 rem The py launcher first: plain `python` on a machine without Python is a stub

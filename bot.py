@@ -4489,10 +4489,15 @@ def _check_install_instructions() -> None:
     # was a hole -- mutation testing caught it: renaming BOOTSTRAP_FILE without
     # renaming the file made this check quietly skip itself while the reply handed out
     # a link to a file that is not in the repository.
+    # The one string the two Windows files have to agree on by name: the bootstrap
+    # writes it, the launcher reads it to decide which of two sentences it is allowed to
+    # say. A rename on one side turns the launcher back into a liar -- it would tell a
+    # friend with a working updater that their copy cannot update itself.
+    stamp = ".tarball-install"
     here = Path(__file__).resolve().parent
     bootstrap = here / BOOTSTRAP_FILE
     if not bootstrap.exists():
-        assert (here / ".tarball-install").exists(), (
+        assert (here / stamp).exists(), (
             f"{BOOTSTRAP_FILE} is not in this checkout, and no .tarball-install stamp "
             f"explains why: /instalar windows hands out a link to a file that does not "
             f"exist in the repository"
@@ -4513,7 +4518,42 @@ def _check_install_instructions() -> None:
         assert f'--exclude "*/{BOOTSTRAP_FILE}"' in body, (
             f"{BOOTSTRAP_FILE} must exclude itself from its own unpack"
         )
-        linked = "and the .cmd it links to fetches the same repo"
+        # Written, not merely mentioned. `stamp in body` was the first version of this
+        # and mutation testing walked straight through it: the name also appears in the
+        # `set` that defines it and in the comments, so deleting the redirection that
+        # creates the file left the assert green. These pin the two halves separately.
+        assert f'set "STAMP={stamp}"' in body, f"{BOOTSTRAP_FILE} must name the stamp {stamp}"
+        assert '> "%TARGET%\\%STAMP%"' in body, (
+            f"{BOOTSTRAP_FILE} must actually write the stamp into the folder: without it "
+            f"{LAUNCHER_FILE['windows']} cannot tell that copy from a hand-unpacked zip"
+        )
+
+        launcher = here / LAUNCHER_FILE["windows"]
+        if launcher.exists():
+            # Read as ASCII on purpose, which pins the other rule those two files live
+            # by: cmd.exe reads a .cmd in the console's OEM codepage, so an accent added
+            # to either of them is mojibake in the window a friend is reading.
+            drives = launcher.read_text(encoding="ascii")
+            assert f'if exist "{stamp}"' in drives, (
+                f"{LAUNCHER_FILE['windows']} does not read {stamp}, so it still tells a "
+                f"downloaded copy that it cannot update itself -- which is false of one"
+            )
+            # The sentences the friend reads, and not just the bytes of the file: both
+            # names appear in that file's comments, so a check written against the whole
+            # text passes while the window says something else entirely.
+            spoken = [line for line in drives.splitlines() if line.startswith("echo ")]
+            assert any(BOOTSTRAP_FILE in line for line in spoken), (
+                f"{LAUNCHER_FILE['windows']} has to say {BOOTSTRAP_FILE} out loud: telling "
+                f"somebody their copy has an updater without naming the file helps nobody"
+            )
+            # And the case the old sentence was written for must survive intact. A zip
+            # somebody unpacked by hand has no .git and no stamp, and for that copy the
+            # sentence is true; making it accurate for one copy must not cost the other.
+            assert any("no se puede actualizar sola" in line for line in spoken), (
+                f"{LAUNCHER_FILE['windows']} lost the line for a copy that genuinely "
+                f"cannot update itself"
+            )
+        linked = "the .cmd it links to fetches the same repo, and both agree on the stamp"
     else:
         linked = f"{BOOTSTRAP_FILE} absent here, its URL not pinned"
 

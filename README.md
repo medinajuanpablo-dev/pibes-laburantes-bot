@@ -239,8 +239,15 @@ lists what was measured, what was only read from documentation, and what the fir
 should be watched for.
 
 **A tarball copy and a clone update differently**, which is a real cost of this and not a detail:
-`git pull` for a clone, a re-fetch for a download. The bootstrap refuses to unpack over a `.git`, so
-the two cannot fight over one folder. `docs/updating.md` has the table of which copy has which.
+`git pull` for a clone, a re-fetch for a download. Two rules keep them from contradicting each other.
+The bootstrap **refuses to unpack over a `.git`**, so they never fight over one folder. And
+`run-bot.cmd` reads the `.tarball-install` stamp the bootstrap leaves, because *"esta copia no se
+puede actualizar sola"* — the sentence it printed whenever there was no `.git` — is **false** of a
+downloaded copy: that copy has an updater, it is just not git, and no question you can ask `git`
+distinguishes the two. What it says instead names the installer rather than claiming the copy is
+current, since opening the launcher directly updates nothing. The zip's sentence survives untouched
+and is asserted, because for a hand-unpacked zip it was always true. `docs/updating.md` has the
+table of which copy has which.
 
 `mac` and `windows` are the arguments, and **bare is the common case, not the fallback** — a tap on
 the command menu sends `/instalar` with nothing after it, and this audience taps. Bare answers with

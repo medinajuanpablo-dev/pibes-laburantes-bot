@@ -26,7 +26,8 @@ Three outcomes, and the launcher says which one happened, in Spanish:
 | `Ya tenías la última versión.` | the pull succeeded and `HEAD` did not move |
 | `Listo, lo actualicé a la última versión.` | the pull fast-forwarded |
 | `No pude buscar actualizaciones; sigo con la versión que ya tenías.` | no network, a remote asking for credentials, a local edit in the way, or anything else `git pull --ff-only` refuses |
-| `Esta copia no se puede actualizar sola.` | there is no `.git` — somebody downloaded a zip. Tell them to clone. |
+| `Esta copia no se puede actualizar sola.` | no `.git` **and** no `.tarball-install` — somebody unpacked a zip by hand, or a clone landed on a machine with no `git`. Tell them to clone, or on Windows to use the download link. |
+| `Esta copia se actualiza abriendo instalar-bot.cmd…` | no `.git`, but the bootstrap's stamp is there. That copy **does** have an updater, it is just not git — and `run-bot.cmd` is not it. Opening the launcher directly runs the version already on disk. |
 
 The third case is deliberately not fatal: a friend must always be able to run the copy they already
 have. Credential prompts are disabled (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`) so a remote
@@ -66,9 +67,15 @@ Three things keep the two from contradicting each other, and each one is deliber
   what keeps working, and re-downloading the same link is the whole fix if it ever has to change.
   Keep that file small and its behaviour stable, and put anything that has to change on a friend's
   machine in `run-bot.cmd`, which the unpack *does* replace.
-- **The bootstrap leaves a `.tarball-install` stamp in the folder.** That is the only thing that
-  tells a downloaded copy apart from a zip somebody unpacked by hand: both have no `.git`, and only
-  one of them has an updater.
+- **The bootstrap leaves a `.tarball-install` stamp in the folder, and `run-bot.cmd` reads it.** That
+  is the only thing that tells a downloaded copy apart from a zip somebody unpacked by hand: both
+  have no `.git`, `git` can be asked nothing that separates them, and only one of them has an
+  updater. Before the stamp existed, the launcher told both of them *"esta copia no se puede
+  actualizar sola"*, which is true of the zip and false of the download. What the honest branch says
+  is deliberately **not** "you are up to date": opening `run-bot.cmd` directly does no update at all,
+  so it names the file that does one instead of claiming a freshness it cannot check. The self-check
+  pins both files to the same stamp name, and pins that the zip's sentence still exists — making the
+  message accurate for one copy must not cost the other.
 
 **Nothing about the macOS path changed, and it must not.** A downloaded `.command` cannot run at all
 (`README.md` §2.2, measured), so a macOS bootstrap would be a file that cannot be double-clicked.
