@@ -140,12 +140,18 @@ Three things follow from the design and are not obvious:
   that instance keeps polling through the conflict, while the one nobody told anything yields after
   60 s. Both sides read the identical HTTP 409, so without that flag both conclude they lost and the
   group is left with no bot at all — measured on 2026-08-09, §4.9.
-- **Distribution is `git clone`, never a downloaded zip**, and that is also the update channel: each
-  launcher runs `git pull --ff-only` on startup, so the owner pushes and every friend gets the
-  change on their next double-click. It also side-steps Gatekeeper entirely, and it is what makes
-  the launcher double-clickable at all: git restores the exec bit and writes no
+- **On macOS, distribution is `git clone` and never a download**, and that is also the update
+  channel: the launcher runs `git pull --ff-only` on startup, so the owner pushes and every friend
+  gets the change on their next double-click. It also side-steps Gatekeeper entirely, and it is what
+  makes the launcher double-clickable at all: git restores the exec bit and writes no
   `com.apple.quarantine`, and a downloaded file has the first missing and the second present. A
   `.command` needs both to run — measured, §2.2.
+- **On Windows there is a second way in, because a `.cmd` needs no exec bit**: `instalar-bot.cmd`, a
+  downloaded bootstrap that fetches the repository as a tarball and hands off to `run-bot.cmd` (§2.2).
+  It brings its own update channel with it — it re-fetches on every double-click — so **`git push` is
+  still the entire release process for both kinds of copy**. Which copy has which updater, and the
+  two rules that stop them contradicting each other, are in `docs/updating.md`. Untested on real
+  Windows, like the launcher beside it.
 - **Whatever was posted while nobody was hosting is dropped**, not replayed — `run_polling` is
   called with `drop_pending_updates=True`. Telegram holds updates for ~24 h and a handover always
   follows a gap, so the default would dump the whole gap into the group at once. Measured with
@@ -157,14 +163,15 @@ still the way the owner runs it, and the launcher is a convenience wrapped aroun
 
 ### 2.2 The bot hands out its own installer
 
-`/instalar` replies with the one line a friend pastes to become a host. It works in the group and
-in a DM, and Telegram lists it in the command menu, so nobody has to be told it exists.
+`/instalar` replies with what a friend needs in order to become a host: **on macOS the one line they
+paste, on Windows the one file they download.** It works in the group and in a DM, and Telegram lists
+it in the command menu, so nobody has to be told it exists.
 
-**It is a message, not a file, and that is forced rather than chosen.** Three facts rule it out —
-not only sending `run-bot.command` itself, but sending any small bootstrap that would clone the repo
-and hand off to it. Two of them are about what a downloaded file *is*, and were measured on
-2026-08-09, macOS 15.1.1 (24B91), by opening one script four times and checking whether its body
-actually ran:
+**It is a message and never an attachment, and on macOS that is forced rather than chosen.** Three
+facts rule an attachment out there — not only sending `run-bot.command` itself, but sending any small
+bootstrap that would clone the repo and hand off to it. Two of them are about what a downloaded file
+*is on macOS*, and were measured on 2026-08-09, macOS 15.1.1 (24B91), by opening one script four
+times and checking whether its body actually ran:
 
 | file mode | `com.apple.quarantine` | double-click runs it |
 |---|---|---|
@@ -188,13 +195,59 @@ The third fact is the older one: **a launcher on its own is inert.** `run-bot.co
 land the friend in a real clone — so it is not what closes the question. The two measurements above
 are.
 
-Shipping the whole repository as an archive fails for a fourth reason: with no `.git` it can never
+Shipping the whole repository as an archive fails for a fourth reason, and it is the one that turns
+out to be about the *updater* rather than the archive: with no `.git`, nothing in the folder can ever
 `git pull`, so it is a snapshot that rots — the opposite of what this is for. The one command that
 creates a real clone travels as text, so nothing is quarantined and nothing is missing a mode bit:
 git restores both, which is exactly why a cloned `run-bot.command` runs on a double-click when the
 same bytes downloaded do not. It lands the friend in a working copy whose launcher pulls on every
 startup. **That is what keeps every friend current: the owner pushes, and the next double-click has
 it.**
+
+#### Windows gets a link instead, and it is the only platform where that can work
+
+Everything above is a macOS measurement, and one line of it does not carry across: **a `.cmd` needs
+no exec bit.** So a downloaded launcher-shaped file genuinely runs on Windows, where a downloaded
+`.command` cannot. That asymmetry is the whole reason `/instalar windows` hands out a **link** and
+`/instalar mac` still hands out a command, and it is why there is no macOS twin of the bootstrap.
+
+What the link points at is not `run-bot.cmd`. A launcher on its own is inert on Windows for exactly
+the reasons it is inert on macOS — its first act is `git pull` in a folder with no `.git` and its
+last is running a `bot.py` that is not there — so **linking the launcher would move the git step, not
+remove it**. The link points at `instalar-bot.cmd`, a bootstrap that fetches the repository as a
+source tarball, unpacks it into the folder a clone would have made, and hands off to `run-bot.cmd`.
+It re-implements nothing else: Python, ffmpeg, the venv, the token and the hand-over question all
+still belong to the launcher.
+
+Three things make it work, and each was measured on 2026-08-10 from macOS:
+
+- **GitHub serves the tarball to nobody in particular.**
+  `codeload.github.com/…/tar.gz/refs/heads/main` answers `HTTP/2 200`,
+  `content-disposition: attachment`, `content-type: application/x-gzip`, with no account, no
+  credentials and no git.
+- **`curl` and `tar` already ship with Windows** (System32, since Windows 10 build 17063 / 1803), so
+  nothing is installed on the friend's machine and no binary is ever downloaded. The bootstrap calls
+  both by full path — a bare `tar` can resolve to Git for Windows' GNU tar, which reads `C:\…` after
+  `-f` as a remote host and fails.
+- **Re-running it cannot cost the friend their token.** `tar` overwrites the members of the archive
+  and never touches a file that is not in it, and the archive is the *tracked* tree of `main`, so
+  `.env` and `.venv/` are absent from it by construction. Verified by unpacking the real archive
+  three times over a folder holding both.
+
+**That the script runs at all is untested**: there is no Windows in this project. `docs/updating.md`
+lists what was measured, what was only read from documentation, and what the first Windows friend
+should be watched for.
+
+**A tarball copy and a clone update differently**, which is a real cost of this and not a detail:
+`git pull` for a clone, a re-fetch for a download. Two rules keep them from contradicting each other.
+The bootstrap **refuses to unpack over a `.git`**, so they never fight over one folder. And
+`run-bot.cmd` reads the `.tarball-install` stamp the bootstrap leaves, because *"esta copia no se
+puede actualizar sola"* — the sentence it printed whenever there was no `.git` — is **false** of a
+downloaded copy: that copy has an updater, it is just not git, and no question you can ask `git`
+distinguishes the two. What it says instead names the installer rather than claiming the copy is
+current, since opening the launcher directly updates nothing. The zip's sentence survives untouched
+and is asserted, because for a hand-unpacked zip it was always true. `docs/updating.md` has the
+table of which copy has which.
 
 `mac` and `windows` are the arguments, and **bare is the common case, not the fallback** — a tap on
 the command menu sends `/instalar` with nothing after it, and this audience taps. Bare answers with
@@ -211,19 +264,28 @@ is load-bearing: the apology, the oversize line and the insult answer are unesca
 them carrying a raw URL.
 
 **Two things the reply says, and its length is the third decision.** One platform is **three
-lines** — where to paste, the block, the token — and both platforms are **five**. That ceiling is
-the feature and it is asserted, not a style note: the wall it replaced was 12 lines per platform
+lines** — what to do, the thing to act on, the token — and both platforms are **five**. That ceiling
+is the feature and it is asserted, not a style note: the wall it replaced was 12 lines per platform
 and **22 bare**, and the audience taps and skims, so the one line that matters was the one that got
-skimmed past. A line earns its place by stopping a friend in the next minute, and exactly two do.
-**`git` has to be there** — on macOS running it without the Command Line Tools pops Apple's
-installer dialog, on Windows it is absent entirely and the reply links the installer. And the
+skimmed past. A line earns its place by stopping a friend in the next minute, and exactly two do per
+platform. **The first one is the obstacle that platform actually has, and they are different
+obstacles**: on macOS git, because running it without the Command Line Tools pops Apple's installer
+dialog; on Windows nothing to install at all, so the line spends itself on what the machine will ask
+before it runs a downloaded file — plus the one wrinkle in the download, which is that
+raw.githubusercontent.com serves a `.cmd` as `text/plain` with no `content-disposition` (measured), so
+a browser is expected to show it rather than save it. The second is the same on both: the
 **token comes from the owner, separately**, which the launcher asks for on first run.
+
+The budget did not move when Windows changed mechanism, and that is the check that matters most here:
+two lines per platform before and after, so a link cost nothing and bought a step.
 
 **What was cut went somewhere, it was not dropped.** *Only one person hosts at a time* is not
 something a friend acts on while reading a chat message: the launcher asks before taking over, at
 the moment it matters (§2.1), and `EMPEZAR-ACA.md` opens with it. *From now on it is a double-click
-and it updates itself* is the same, and lives under "Cada vez" in that file — which the clone
-brings with it, so every reader of this reply gets it within the minute. The bare reply also
+and it updates itself* is the same, and lives under "Cada vez" in that file — which arrives with the
+code either way, clone or tarball, so every reader of this reply gets it within the minute. The
+bootstrap also says the one thing that file cannot know, in its own window: that for a downloaded copy
+*this* is the everyday file, since it is the one that updates. The bare reply also
 stopped spending a line advertising `/instalar mac`: `EMPEZAR-ACA.md` offers both narrow forms, and
 tapping that line in Telegram would have sent the bare command again anyway, since only the
 `/instalar` part is a tappable command and the ` mac` after it is plain text.
@@ -237,6 +299,17 @@ repository moves, and it cannot go stale *silently*: the self-check compares it 
 checkout's own `origin` by `owner/repo`, so an SSH origin still matches, and separately refuses
 anything that is not `https://`. Verified 2026-08-09 with credential helpers disabled:
 `git ls-remote` on that URL answers anonymously, so a friend with no GitHub account can clone.
+
+**The download link is derived from that same string, and so is the check on it.** `BOOTSTRAP_URL` is
+`CLONE_URL` rewritten to `raw.githubusercontent.com`, the way `CLONE_DIR` is derived rather than
+written out: a second hand-typed copy of the repository's name is a second thing that can point
+friends somewhere else. The repository is now named in four places — that constant, the reply's link,
+`EMPEZAR-ACA.md`, and the `codeload` URL inside `instalar-bot.cmd` — and the last one is the dangerous
+one, because a friend who downloads that file runs whatever *it* fetches. So the self-check opens
+`instalar-bot.cmd` and asserts it fetches the archive of the same `owner/repo`, and that its
+`--exclude` still names itself. Both are skipped when the file is absent, which is the normal state of
+a downloaded copy: the bootstrap excludes itself from its own unpack, so `run-bot.cmd` is the only
+`.cmd` that lands in a friend's folder.
 
 #### The reply can never contain the token
 
@@ -894,6 +967,7 @@ a preference.
 bot.py                    the whole application, plus its self-check
 run-bot.command           the macOS launcher. Committed 100755 or it does not double-click.
 run-bot.cmd               the Windows launcher. Untested on real Windows.
+instalar-bot.cmd          the Windows bootstrap: what /instalar windows links to. §2.2. Untested.
 requirements.txt          pinned: yt-dlp[default,curl-cffi]==2026.7.4, python-telegram-bot==22.8
 README.md                 this file
 EMPEZAR-ACA.md            the friend-facing quickstart, in Spanish. Product copy, not docs.
@@ -906,6 +980,7 @@ docs/archive/             the original plan and prompt-order, superseded, kept f
 rejected.jsonl            the bounce ledger this machine wrote. gitignored. §5.1
 insults.jsonl             every time the group called the bot stupid. gitignored. §4.12
 .venv/                    gitignored, and it also holds the launcher's dependency stamp
+.tarball-install          only in a copy the Windows bootstrap made. Never in this repo. §2.2
 ```
 
 Nothing in this repo is generated. Everything tracked is either the application, its pins, or a

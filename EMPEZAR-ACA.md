@@ -26,11 +26,23 @@ Lo de abajo es lo mismo, explicado paso por paso. Si el bot está apagado, segu�
 
 ### 1. Bajar la carpeta del bot
 
-Bajala con `git`, **no la bajes como ZIP**. Es un paso más la primera vez y te ahorra dos problemas:
-así se actualiza sola, y así tu compu no la trata como "programa sospechoso de internet".
+**En Windows** bajá este archivo y hacé doble clic:
 
-**En Mac:** abrí la app **Terminal** (Cmd+Espacio, escribí `Terminal`, Enter), pegá esto y apretá
-Enter:
+<https://raw.githubusercontent.com/medinajuanpablo-dev/pibes-laburantes-bot/main/instalar-bot.cmd>
+
+No hace falta instalar nada: ese archivo baja el bot solo, lo deja en `Documentos` y lo prende. Dos
+cosas normales que van a pasar la primera vez:
+
+- **Si el link te abre una pantalla llena de texto** en vez de bajar el archivo, apretá **Ctrl+S** y
+  guardalo. Es el mismo archivo.
+- **Windows te va a avisar que no conoce el archivo.** Apretá **Más información** y después
+  **Ejecutar de todas formas**.
+
+**De ahí en más, abrí ese mismo archivo cada vez**: se actualiza y prende el bot de una.
+
+**En Mac** es distinto: ahí hay que bajarla con `git` y **no se puede como archivo bajado** — Mac no
+deja abrir un archivo así. Abrí la app **Terminal** (Cmd+Espacio, escribí `Terminal`, Enter), pegá
+esto y apretá Enter:
 
 ```
 cd ~/Documents && git clone https://github.com/medinajuanpablo-dev/pibes-laburantes-bot.git
@@ -39,10 +51,12 @@ cd ~/Documents && git clone https://github.com/medinajuanpablo-dev/pibes-laburan
 Si te aparece una ventana que dice que faltan las "herramientas de línea de comandos", aceptá,
 esperá a que termine y volvé a pegar el comando.
 
-**En Windows:** instalá Git desde <https://git-scm.com/download/win>, después abrí **Git Bash** y
-pegá el mismo comando.
+En los dos casos te queda una carpeta llamada `pibes-laburantes-bot`. **No la bajes como ZIP**: un
+ZIP no se actualiza nunca más, y el programa te lo va a decir cada vez que lo abras.
 
-Te queda una carpeta llamada `pibes-laburantes-bot`.
+(En Windows también sirve el camino de Mac si ya tenés git: instalás Git desde
+<https://git-scm.com/download/win>, abrís **Git Bash** y pegás el mismo comando. Es más largo y no
+hace falta.)
 
 ### 2. Pedir el token
 
@@ -51,10 +65,10 @@ No la pegues en el grupo ni se la pases a nadie.
 
 ### 3. Prenderlo
 
-Entrá a la carpeta y hacé doble clic en:
-
-- **Mac:** `run-bot.command`
-- **Windows:** `run-bot.cmd`
+- **Windows, si bajaste el archivo:** ya está, `instalar-bot.cmd` lo prende solo. No tenés que
+  buscar nada más.
+- **Mac, o Windows con git:** entrá a la carpeta y hacé doble clic en `run-bot.command` (Mac) o
+  `run-bot.cmd` (Windows).
 
 Se abre una ventana negra con texto. Eso está bien, es así. La primera vez tarda un minuto porque
 prepara todo, y te va a pedir el token: pegalo y apretá Enter. Queda guardado, no te lo pide de
@@ -66,8 +80,15 @@ Si te falta algo (Python o ffmpeg), la ventana te dice en una línea qué instal
 
 ## Cada vez
 
-Doble clic en el mismo archivo. Se actualiza sola, se fija si alguien más lo tiene prendido, y
-arranca.
+Doble clic en **el mismo archivo que usaste la primera vez**:
+
+- **Windows, si bajaste el archivo:** `instalar-bot.cmd`, el que quedó en Descargas. No lo borres.
+- **Mac, o Windows con git:** `run-bot.command` o `run-bot.cmd`, dentro de la carpeta.
+
+Se actualiza sola, se fija si alguien más lo tiene prendido, y arranca.
+
+(En Windows, si abrís `run-bot.cmd` en vez del que bajaste, el bot arranca igual pero **no se
+actualiza**. La ventana te lo avisa y te dice cuál abrir.)
 
 **Dejá la ventana abierta.** Mientras esté abierta, el bot anda.
 
@@ -91,21 +112,19 @@ En la ventana pueden aparecer tres avisos sobre esto, y quieren decir cosas dist
 
 ## Si tu compu dice que el archivo es peligroso
 
-Esto pasa **solo si bajaste la carpeta como ZIP en vez de usar `git clone`**. Si la clonaste con
-git, no te va a pasar nunca.
+**En Windows es normal y no rompiste nada.** El archivo que bajaste vino de internet, así que
+Windows pregunta antes de abrirlo: **Más información** → **Ejecutar de todas formas**. Pasa la
+primera vez y listo.
 
-**En Mac** el doble clic no hace nada, o aparece una ventana diciendo que el archivo *"proviene de
-un desarrollador no identificado"*, o que *"Apple no pudo verificar"* que no tenga software
-malicioso. (Comprobado en macOS 15.1: el archivo marcado como bajado de internet directamente no
-arranca; el mismo archivo traído con `git clone` abre sin decir nada.)
+**En Mac no hay forma de arreglarlo**, y por eso ahí el camino es `git clone` y no un archivo
+bajado. Un archivo que bajaste de internet directamente no arranca: el doble clic no hace nada, o
+aparece una ventana diciendo que *"proviene de un desarrollador no identificado"* o que *"Apple no
+pudo verificar"* que no tenga software malicioso. Clic derecho → **Abrir** tampoco alcanza.
+(Comprobado en macOS 15.1: el mismo archivo traído con `git clone` abre sin decir nada.)
 
-**En Windows** aparece una pantalla azul de **SmartScreen**: *"Windows protegió su PC"*.
-
-En los dos casos la solución es la misma y es la de arriba: **borrá lo que bajaste y traelo con
-`git clone`**. Los archivos que baja git no quedan marcados como "descargados de internet", así que
-no aparece ninguna de esas ventanas. Si igual querés abrir el que ya bajaste, en Mac es clic
-derecho sobre el archivo → **Abrir**, y en Windows es **Más información** → **Ejecutar de todas
-formas**.
+**Y en las dos, si bajaste la carpeta como ZIP, borrala.** Un ZIP no se actualiza nunca más: te
+quedás con la versión del día que lo bajaste y nadie se entera. Traela con `git clone` (Mac) o con
+el link de arriba (Windows).
 
 ---
 
