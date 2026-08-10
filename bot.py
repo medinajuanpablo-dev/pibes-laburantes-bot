@@ -181,10 +181,25 @@ SUPPORTED_HOSTS = frozenset(
     }
 )
 
-# The subset of the above that has image posts AT ALL. YouTube and Facebook serve
-# video; a link to either that fails to extract is a failure, full stop, and can
-# never be "a post with no video in it". Only Instagram can, so only Instagram may
-# reach the image fallback -- see _image_fallback for the defect this closes.
+# The subset of the above whose image posts this bot has ever delivered: Instagram,
+# and only Instagram. A YouTube or Facebook link that fails to extract is treated as
+# a failed video, full stop, so only Instagram may reach the image fallback -- see
+# _image_fallback for the defect this closes.
+#
+# Careful with the reason, because the obvious phrasing is false. "YouTube and
+# Facebook cannot have image posts" is true of YouTube and NOT of Facebook, whose
+# extractor accepts photo.php and /posts/ URLs. What is true is narrower and is the
+# actual basis for this list: the image path is measured on Instagram (README §4.8)
+# and nowhere else, and on Facebook the cost of guessing is the defect itself --
+# "Cannot parse data" fires under mere throttling (§5.2), so a Facebook fallback
+# would answer a perfectly good video with its poster frame.
+# ponytail: a Facebook photo post therefore gets the apology, and whether it ever
+# reached the fallback before this guard is unmeasured in both directions -- no
+# Facebook image post has ever been in SELF_CHECK_URLS or in the ledger. Upgrade
+# path if a friend reports one: find a live public photo post, check what the probe
+# returns for it, and only then add the host -- with an entry in SELF_CHECK_URLS,
+# because a second site on the image path needs the same standing proof Instagram
+# has.
 #
 # The signal is the HOST OF THE PASTED URL, not yt-dlp's `extractor` key, and the
 # two can disagree. Three reasons, in order of weight:
@@ -398,6 +413,23 @@ INSULT_REPLY = "Lo lamento, hago lo que puedo"
 #     answering "estudio".
 # Moving either one needs a phrase the group actually sent, not a hypothetical.
 INSULT_WORDS: tuple[tuple[str, float], ...] = (("bot", 0.66), ("estupido", 0.85))
+
+# Words that clear the bar above and are not typos of anything -- they are words.
+# THIS LIST EXISTS BECAUSE DIFFLIB CANNOT TELL "bro" FROM "vot": both share exactly
+# two letters with "bot", so both score 0.667, and no threshold can accept the typo
+# the owner named while refusing the most common English loanword in this group's
+# chat. "bro que estupido" is an ordinary sentence and it fired -- found by review,
+# not by the corpus, which is the point of writing this down.
+#
+# Everything here was enumerated rather than imagined: all 226 tokens of three
+# letters or fewer that clear 0.66 against "bot", filtered down to the ones a
+# Spanish chat plausibly types. Regenerate it the same way if the thresholds move.
+# Adding one costs nothing -- nobody types "boa" meaning the bot -- and the two
+# matched words in insults.jsonl are what will name the next one.
+NOT_THE_BOT = frozenset(
+    {"bro", "bio", "boa", "bol", "bon", "bos", "box", "boy", "bit", "bat", "but",
+     "not", "hot", "lot", "out"}
+)
 
 # How many tokens may sit BETWEEN the two words. One, so "bot re estupido" and "bot
 # es estupido" fire -- "re" is how this group says "very" -- while "el bot funciona,
@@ -1107,6 +1139,9 @@ def insult_words(text: str | None) -> tuple[str, str] | None:
         about a boot or a button. It also refuses "robot", which is a real miss and
         the price of refusing "boton" -- difflib scores the two identically.
       * A THRESHOLD PER WORD, both sitting in a measured gap. See INSULT_WORDS.
+      * AND A LIST OF WORDS THAT ARE NOT TYPOS, because the threshold cannot see
+        the difference: "bro" and "vot" both share two letters with "bot" and both
+        score 0.667. See NOT_THE_BOT.
 
     Known misses, all deliberate and all cheap: "botestupido" written without the
     space (nothing here joins tokens, and the owner did not ask for it), "robot
@@ -1117,6 +1152,8 @@ def insult_words(text: str | None) -> tuple[str, str] | None:
     tokens = insult_tokens(text)
     found: dict[str, list[tuple[int, str]]] = {}
     for index, token in enumerate(tokens):
+        if token in NOT_THE_BOT:
+            continue
         for word, threshold in INSULT_WORDS:
             if len(token) > len(word):
                 continue
@@ -2726,6 +2763,7 @@ def _check_failed_extraction_keeps_its_error() -> None:
             "https://www.youtube.com/watch?v=AAAAAAAAAAA", workspace,
             info=DEAD_YOUTUBE_INFO, video_error=unavailable, image=None,
         )
+    assert asked == ["video"], f"a YouTube failure no longer probes at all: {asked}"
     assert isinstance(failed, str), f"a dead video must not be delivered as anything: {failed}"
     assert unavailable in failed, f"the extractor's own words must survive: {failed}"
     assert "no downloadable image either" not in failed, (
@@ -3157,15 +3195,19 @@ def _check_message_logging() -> None:
         )
         # An unsupported host now writes to the ledger as well as to the log, so the
         # ledger goes somewhere disposable: a self-check run must never leave two
-        # invented TikTok links in the owner's real rejected.jsonl.
-        real_ledger = globals()["REJECTED_LEDGER"]
+        # invented TikTok links in the owner's real rejected.jsonl. BOTH files, not
+        # just that one: on_message can write to either now, and nothing here should
+        # depend on the texts below never being read as an insult.
+        real_rejected, real_insults = globals()["REJECTED_LEDGER"], globals()["INSULT_LEDGER"]
         with temp_workspace() as workspace:
             globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+            globals()["INSULT_LEDGER"] = workspace / "insults.jsonl"
             try:
                 with _capture_log(logging.INFO) as messages:
                     asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
             finally:
-                globals()["REJECTED_LEDGER"] = real_ledger
+                globals()["REJECTED_LEDGER"] = real_rejected
+                globals()["INSULT_LEDGER"] = real_insults
         return messages
 
     no_url = deliver_nothing("che alguien vio el partido ayer")
@@ -3208,10 +3250,14 @@ def _check_unattempted_links_are_recorded() -> None:
             delivered.append(url)
 
         real_deliver, real_ledger = globals()["_deliver"], globals()["REJECTED_LEDGER"]
+        real_insults = globals()["INSULT_LEDGER"]
         globals()["_deliver"] = _fake_deliver
         with temp_workspace() as workspace:
             ledger = workspace / "rejected.jsonl"
             globals()["REJECTED_LEDGER"] = ledger
+            # on_message reaches the insult half too, and nothing here should depend
+            # on these texts never being read as one.
+            globals()["INSULT_LEDGER"] = workspace / "insults.jsonl"
             try:
                 with _capture_log(logging.INFO) as lines:
                     asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
@@ -3220,6 +3266,7 @@ def _check_unattempted_links_are_recorded() -> None:
             finally:
                 globals()["_deliver"] = real_deliver
                 globals()["REJECTED_LEDGER"] = real_ledger
+                globals()["INSULT_LEDGER"] = real_insults
 
     # One unsupported URL.
     records, delivered, lines, raw = _run("miren https://www.tiktok.com/@a/video/1")
@@ -3304,6 +3351,12 @@ def _check_unattempted_links_are_recorded() -> None:
 #   "el bot funciona, no seas estupido vos"    -> killed matching the two words
 #       anywhere in the message; hence INSULT_MAX_GAP.
 #   "sos un estupido" / "gracias bot"          -> killed either word on its own.
+#   "bro que estupido"                         -> killed the thresholds ALONE:
+#       "bro" scores 0.667 against "bot", exactly what "vot" scores, so no number
+#       accepts the typo the owner named and refuses the loanword. Hence
+#       NOT_THE_BOT. This one was found by review after the corpus was written,
+#       which is the honest state of the list: it is as good as the imagination
+#       that produced it.
 INSULTS_THAT_MUST_FIRE = (
     "bot estupido",
     "bot estúpido",
@@ -3358,6 +3411,10 @@ ORDINARY_CHAT_THAT_MUST_NOT_FIRE = (
     "que voto estupido",
     "esa moto estupida",
     "el robot de la fabrica",
+    "bro que estupido",                             # "bro" is 0.667, same as "vot"
+    "que estupido bro",
+    "jaja bro, que estupida esa peli",
+    "esa bio estupida que tiene",
     "abri el bot, estudio despues",                 # 0.800 against "estupido"
     "me voy a estudiar",
     "mira que boludo estupido",                     # insulting a friend, not the bot
@@ -3391,6 +3448,16 @@ def _check_insult_detection() -> None:
         )
     assert insult_words("") is None and insult_words(None) is None
     assert insult_words("\U0001f602\U0001f602\U0001f602") is None, "emoji are not words"
+
+    # Every word in NOT_THE_BOT has to be one the matcher would otherwise accept --
+    # a dead entry is a claim about the thresholds that stopped being true, and it
+    # would go unnoticed exactly like an unreachable FAILURE_SIGNATURES row.
+    for word in NOT_THE_BOT:
+        assert insult_words(f"{word} estupido") is None, f"NOT_THE_BOT failed to stop {word!r}"
+        assert difflib.SequenceMatcher(None, word, "bot").ratio() >= INSULT_WORDS[0][1], (
+            f"{word!r} does not clear the threshold anyway; the entry is dead"
+        )
+    assert "bot" not in NOT_THE_BOT, "the bot is the bot"
     # The matched words are what gets recorded, so their shape is part of the contract.
     assert insult_words("che VOT estúpido") == ("vot", "estupido"), insult_words("che VOT estúpido")
 

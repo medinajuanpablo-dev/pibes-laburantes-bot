@@ -335,13 +335,25 @@ video it had asked for, nobody learned that YouTube was blocked, and the ledger 
 success-shaped nothing. Neither guard could fire: there genuinely were no formats, and there
 genuinely was an image.
 
-**The fix is the site, asked before anything else runs: only Instagram has image posts at all.**
-`has_image_posts()` reads the pasted URL's host against `IMAGE_POST_HOSTS`; off Instagram
-`_image_fallback` returns `None` on its first line and `download_into` re-raises what the extractor
-said. That kills the class instead of the symptom — a YouTube or Facebook link that fails to
-extract is a failed video, whatever the reason, today's or next year's — and it is free: **a
-failing YouTube link no longer pays for the probe or for the ~38 thumbnail fetches** that earlier
-revisions of this section recorded as an accepted cost.
+**The fix is the site, asked before anything else runs: Instagram is the only site whose image
+posts this bot has ever delivered.** `has_image_posts()` reads the pasted URL's host against
+`IMAGE_POST_HOSTS`; anywhere else `_image_fallback` returns `None` on its first line and
+`download_into` re-raises what the extractor said. That kills the class instead of the symptom — a
+YouTube or Facebook link that fails to extract is treated as a failed video, whatever the reason,
+today's or next year's — and it is free: **a failing YouTube link no longer pays for the probe or
+for the ~38 thumbnail fetches** that earlier revisions of this section recorded as an accepted cost.
+
+**Be careful with the reason, because the obvious phrasing is false.** "YouTube and Facebook cannot
+have image posts" is true of YouTube and **not** of Facebook, whose extractor accepts `photo.php`
+and `/posts/` URLs. The narrower true statement is the one this rests on: the image path is
+measured on Instagram and nowhere else, and on Facebook a wrong guess is the defect itself —
+`Cannot parse data` fires under mere throttling (§5.2), so a Facebook fallback would answer a
+perfectly good video with its poster frame. A Facebook photo post therefore gets the apology, and
+whether it ever reached the fallback before this guard is **unmeasured in both directions**: none
+has ever been in `SELF_CHECK_URLS` or in the ledger. If a friend reports one, find a live public
+photo post, see what the probe returns, and only then add the host — with its own
+`SELF_CHECK_URLS` entry, because a second site on the image path needs the standing proof
+Instagram has.
 
 The **host** is the signal, not yt-dlp's `extractor` key. It is known *before* the probe, while
 `extractor` exists only after an extraction that succeeded; and it is the same question
@@ -532,6 +544,7 @@ a phrase that broke a simpler one:
 | **Both words, and near each other** — within `INSULT_MAX_GAP` = 1 token | *"sos un estupido"* (a person), *"gracias bot"*, and *"el bot funciona, no seas estupido vos"* — both words, four apart | the pair is the signal; either word alone is ordinary chat |
 | **A token may not be longer than the word it matches** | *"esa bota estupida"*, *"el boton estupido"* | difflib scores `bota`→`bot` at **0.857** and `boton`→`bot` at **0.750**; a typo drops or changes a letter, a longer word is a different word |
 | **One threshold per word**, not one for both | *"abri el bot, estudio despues"* | `estudio`→`estupido` is **0.800**, so the threshold is 0.85; `vot`→`bot` is **0.667**, so that one is 0.66 |
+| **A list of words that are not typos** (`NOT_THE_BOT`) | *"bro que estupido"*, *"esa bio estupida"* | `bro`→`bot` is **0.667** — *exactly* what `vot` scores, because both share two letters. No threshold can accept the typo the owner named and refuse the loanword |
 
 The thresholds are `0.66` for `bot` and `0.85` for `estupido`, and each sits in a gap that was
 measured rather than guessed:
@@ -544,7 +557,18 @@ measured rather than guessed:
 0.667 on a three-letter word is exactly "one of the three letters is wrong", which is where a typo
 stops being a typo — the reason a single threshold cannot serve both words. Before either number
 is moved, the phrase that motivates it has to be one the group actually sent; the two corpora in
-the self-check (25 that must fire, 37 that must not) are where it goes.
+the self-check (25 that must fire, 41 that must not) are where it goes.
+
+**`NOT_THE_BOT` is the admission that the thresholds are not enough.** difflib scores by longest
+common subsequence, so `bro` and `vot` are indistinguishable to it — two shared letters each, 0.667
+each — and *"bro que estupido"* is an ordinary sentence that fired. The list is the 3-letter words
+a Spanish chat plausibly types that clear 0.66: it was enumerated (all 226 tokens of ≤3 letters
+that pass, filtered to real words), not imagined, and each entry costs nothing because nobody types
+`boa` meaning the bot. The self-check refuses a **dead** entry — one that would not have matched
+anyway — the same way it refuses an unreachable `FAILURE_SIGNATURES` row.
+
+That one was found by a review pass *after* both corpora were written and green, which is the
+honest measure of how far a corpus written by imagination gets you.
 
 Normalisation is `unicodedata` and `re`, no dependency: NFD minus the combining marks makes
 *estúpido* and *estupido* one word, casefold makes shouting match, splitting on anything outside
@@ -554,8 +578,9 @@ letter, so nothing is lost.
 
 **Known misses, all deliberate.** `botestupido` written without the space (nothing joins tokens,
 and the owner did not ask for it); `robot estupido`, because difflib scores `robot`→`bot` and
-`boton`→`bot` identically at 0.750 and refusing the button is worth losing the robot; and anything
-further apart than one word, like *"el bot es un estupido"*. A missed joke costs nothing.
+`boton`→`bot` identically at 0.750 and refusing the button is worth losing the robot; a real typo
+that lands on a `NOT_THE_BOT` word; and anything further apart than one word, like *"el bot es un
+estupido"*. A missed joke costs nothing.
 
 **The record is its own file, not the ledger** (§5.1 is about links, and its report opens with "N
 links bounced"), and it carries `when`, `chat_id`, `message_id` and **the two matched words**. Two
@@ -707,17 +732,17 @@ string in the self-check is his paste plus the tail yt-dlp 2026.7.4 appends to i
 that character arrives from YouTube's own JSON, and a typographic one would kill the row silently,
 the same way a capital would. Both spellings are asserted.
 
-**The last row used to be keyed on the bot's own sentence, and that was a defect, not a design.**
-Until 2026-08-09 the image fallback answered a dead YouTube link with `has no video and no
-downloadable image either` — its own words, byte-identical for every failing YouTube link — and
+**The deleted-or-private row used to be keyed on the bot's own sentence, and that was a defect, not
+a design.** Until 2026-08-09 the image fallback answered a dead YouTube link with `has no video and
+no downloadable image either` — its own words, byte-identical for every failing YouTube link — and
 yt-dlp's `Video unavailable` was thrown away before anything downstream saw it, ledger included.
 The fallback now declines instead of raising when its thumbnails yield no image (§4.8), so the
 extractor's diagnosis survives, and the row is keyed on it: `[youtube]` pins it to the host and
 `video unavailable` is the cause. Re-measured against the live site after the fix.
 
-What is **not** fixed is the cost: the fallback still fetches all 38 synthesised thumbnails before
-it can tell they are worthless, so a dead YouTube link still burns ~38 requests. Cutting them needs
-an up-front signal, and §4.8 explains why every candidate would put the working image path at risk.
+The cost that came with it is gone too, and later than the row: a dead YouTube link used to burn
+~38 thumbnail requests before the fallback could tell they were worthless, and since the fallback
+declines on the host it now makes no request at all (§4.8).
 
 **These strings are upstream prose and they will drift.** The design makes drift fail safe: a
 reworded message matches no row and the group gets the generic apology, which is where it started.

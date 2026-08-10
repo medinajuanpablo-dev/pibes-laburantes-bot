@@ -90,11 +90,13 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   to close the window — the people are the tie-break, since nothing in the system can be.
 - **The insult matcher is tuned against two corpora, and the second one is the feature.** Both
   ship as the check (`README.md` §4.12). The three rules that keep it quiet are not
-  interchangeable: both words within one token of each other, **a token may never be longer than
-  the word it matches** (difflib scores `bota`→`bot` at 0.857 and `boton`→`bot` at 0.750), and a
+  interchangeable: both words within one token of each other; **a token may never be longer than
+  the word it matches** (difflib scores `bota`→`bot` at 0.857 and `boton`→`bot` at 0.750); a
   threshold per word (`estudio`→`estupido` is 0.800, so 0.85; `vot`→`bot` is 0.667, so 0.66 — one
-  number cannot serve a three-letter word and an eight-letter one). Do not move a threshold without
-  a phrase the group actually sent, and do not add a "smarter" rule: the residual misses
+  number cannot serve a three-letter word and an eight-letter one); and **`NOT_THE_BOT`, because
+  the thresholds are provably not enough** — difflib scores by longest common subsequence, so `bro`
+  and `vot` are the same number to it, and *"bro que estupido"* fired. Do not move a threshold
+  without a phrase the group actually sent, and do not add a "smarter" rule: the residual misses
   (`botestupido`, `robot estupido`) are cheap and the false positives are not.
 - **An insult is not a bounced link and does not go in the ledger.** Its own file, its own reason:
   `--rejected` opens with "N links bounced", groups by host, and is the one report that decides
@@ -122,8 +124,8 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   probe sees `entries: 1`; without it, all of them. Anything measured with a raw
   `yt-dlp --dump-single-json` is therefore a different dict from the one the code gets — carousel
   work goes through `_carousel_options`. `README.md` §4.10.
-- **Only Instagram has image posts, and that is the first question `_image_fallback` asks.**
-  `is_image_post()` says yes to a *failed* extraction — `ignore_no_formats_error` does not suppress
+- **Instagram is the only site whose image posts this bot delivers, and that is the first question
+  `_image_fallback` asks.** `is_image_post()` says yes to a *failed* extraction — `ignore_no_formats_error` does not suppress
   a broken Instagram extraction, but YouTube reports both an unavailable video and a
   `Sign in to confirm you're not a bot` challenge through that same no-formats mechanism, so the
   probe comes back with no formats and 38 thumbnails and the function says yes (measured
@@ -133,6 +135,12 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   and off Instagram the fallback declines before it probes. Host, not yt-dlp's `extractor` key —
   the host is known before the probe and is the same rule `is_supported()` uses (`_host_is_one_of`).
   This also removed the ~38 pointless thumbnail fetches a failing YouTube link used to cost.
+  **The reason is not "the other sites have no image posts" — that is false of Facebook**, whose
+  extractor accepts `photo.php` and `/posts/`. The true one is narrower: the image path is measured
+  on Instagram and nowhere else, and on Facebook a wrong guess *is* the defect, because
+  `Cannot parse data` fires under mere throttling and the fallback would answer a good video with
+  its poster frame. A Facebook photo post gets the apology; whether it ever worked is unmeasured
+  in both directions (`README.md` §4.8 has the upgrade path).
 - **Inside Instagram the older guard still carries everything**: **thumbnails that yield no image
   mean the post never was an image post**, so the fallback returns None and `download_into`
   re-raises the extractor's own words. The host guard took away that guard's only cover (the dead
@@ -217,7 +225,9 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   and an ordinary reply can — the order is the protection) · `on_message` losing either half ·
   the length rule dropped, so `bota` and `boton` become insults · `INSULT_MAX_GAP` widened to four
   or closed to zero · either threshold moved in either direction (0.66/0.85 each sit in a measured
-  gap) · the accents, the casefold or the run-collapsing dropped from `insult_tokens` · the insult
+  gap) · `NOT_THE_BOT` emptied or stopped being consulted (`bro que estupido` fires), or given a
+  **dead** entry that would not have matched anyway ·
+  the accents, the casefold or the run-collapsing dropped from `insult_tokens` · the insult
   half reading `text` but not `caption` · the record or the log line carrying the message body ·
   an insult write failure escaping · insults written into `rejected.jsonl`.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
@@ -267,9 +277,11 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   `getUpdates` afterwards shows **somebody** polling. The two-people-both-say-yes standoff is even
   further from cover — it needs three machines or two runs of the launcher answered yes twice.
 - **Nobody has ever insulted the bot for real.** Every phrase in both corpora was invented by an
-  agent imagining how this group types, so "37 ordinary messages stay quiet" measures the lists,
-  not the group. The first real false positive is worth more than all of them; when one arrives,
-  the two words are in `insults.jsonl` and the fix is a corpus line plus a threshold.
+  agent imagining how this group types, so "41 ordinary messages stay quiet" measures the lists,
+  not the group — and the list's limits are demonstrated, not hypothetical: `bro que estupido`
+  fired and was caught by a review pass, not by the corpus that had just gone green. The first
+  real false positive is worth more than all of them; when one arrives, the two words are in
+  `insults.jsonl` and the fix is a corpus line plus a `NOT_THE_BOT` entry.
 - **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked —
   including its `--take-over` path, which is the mirror of the macOS one whose branches *were*
   driven. Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to
@@ -283,9 +295,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   failing YouTube or Facebook link makes no extra request at all. The open question this replaces —
   finding an up-front signal *inside* Instagram — is still closed for the same reason as before
   (`README.md` §4.8): every candidate risks the working image path. Do not re-open it.
-- **Only five failures are named; everything else is still `no pude bajar ese link`.** That is the
+- **Only six failures are named; everything else is still `no pude bajar ese link`.** That is the
   design, not a gap. A row costs a measurement against the live site — never a guess from an issue
-  tracker or from what an error "probably" says.
+  tracker or from what an error "probably" says. The sixth is the closest this has come to
+  breaking that rule: the owner measured it, the branch that added it could not (`README.md` §5.2).
 - **`pool_timeout` is left at its 1.0 s default.** It governs contention for a 256-connection pool
   that a sequential bot never contends for.
 - **PTB processes updates sequentially**, so a slow upload blocks the handler for its duration. The
