@@ -19,6 +19,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
 | what breaks in production and how to diagnose it | `README.md` §5 |
 | the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
+| which links get answered, which get silence, and why "the bot is down" cannot be one of the answers | `README.md` §5.4 ← read before touching `MEDIA_PLATFORM_HOSTS` or `_handle_links` |
 | the insult the bot answers, its two corpora and both thresholds | `README.md` §4.12 ← read before touching `INSULT_WORDS` |
 | the Spanish line each named failure gets, and why three of them hedge | `README.md` §5.2 ← read before touching `FAILURE_SIGNATURES` |
 | why a failed link gets a second attempt, which yt-dlp knob does **not** reach it, and what a real outage costs the group in seconds | `README.md` §5.3 ← read before touching the retry, `TRANSPORT_RETRY_PAUSE` or `SOCKET_TIMEOUT` |

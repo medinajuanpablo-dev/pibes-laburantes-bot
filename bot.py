@@ -204,6 +204,46 @@ SUPPORTED_HOSTS = frozenset(
     }
 )
 
+# The unsupported hosts that get an ANSWER instead of silence. Not a step towards
+# supporting them: the bot still downloads nothing from any of these.
+#
+# The rule above -- anything unsupported is left alone -- is still right for a news
+# article, a Spotify link or a Google Doc, and a bot that apologises for every URL
+# in the chat is worse than one that stays quiet. It is wrong for a TikTok, where
+# somebody clearly expected a video back, and from the chat "the bot does not do
+# that site" and "the bot is dead" look identical. That confusion is the whole
+# reason this list exists, and keeping it short is the whole reason it works.
+#
+# Every host here is a site where a link is a video BY CONSTRUCTION. X/Twitter,
+# Reddit and Pinterest are deliberately absent: a link to one of those is as often
+# an argument, a thread or a photo as a video, so answering them re-creates exactly
+# the noise the silence rule protects. They are the first candidates if the ledger
+# ever shows the group pasting them.
+#
+# ponytail: SEEDED FROM JUDGEMENT, WHICH IS THE WEAKEST PART OF THIS FEATURE. The
+# ledger is what should grow this list and it has nothing to say yet -- on
+# 2026-08-10 the owner's rejected.jsonl held 6 records and not one of them was an
+# UnsupportedHost, because this group pastes Instagram and essentially nothing else.
+# Upgrade path, and the only one: run `bot.py --rejected`, read the UnsupportedHost
+# pile, and add the host the group actually keeps pasting. Do not add a site because
+# it sounds likely -- that is how this ends up answering everything.
+MEDIA_PLATFORM_HOSTS = frozenset(
+    {
+        "tiktok.com",
+        "twitch.tv",
+        "vimeo.com",
+        "dailymotion.com",
+        "streamable.com",
+        "kick.com",
+    }
+)
+
+# What one of those gets. It names the cause and stops there: no list of the sites
+# that DO work, which would be a second sentence to skim past and would go stale the
+# day a fourth host is supported. What the bot handles is in EMPEZAR-ACA.md, which
+# arrives with the code.
+UNSUPPORTED_MEDIA_REPLY = "ese sitio no lo manejo, no puedo bajar ese link"
+
 # The subset of the above whose image posts this bot has ever delivered: Instagram,
 # and only Instagram. A YouTube or Facebook link that fails to extract is treated as
 # a failed video, full stop, so only Instagram may reach the image fallback -- see
@@ -2031,6 +2071,13 @@ async def _handle_links(message: telegram.Message) -> None:
     that only insults the bot logs this line and is then answered by _handle_insult,
     which says so on its own line. The wording is not softened because it is what
     README.md §5 tells whoever is diagnosing a link that produced no video.
+
+    SILENCE IS STILL THE DEFAULT for a host the bot does not handle, and the one
+    exception is narrow on purpose: MEDIA_PLATFORM_HOSTS, where somebody pasting a
+    link was plainly waiting for a video and cannot tell "not my site" from "the bot
+    is down". Everything else -- a news article, a Spotify link, a Google Doc -- is
+    still left alone, because a bot that answers every URL in the chat is worse than
+    one that stays quiet. A message with no URL in it is untouched by all of this.
     """
     urls = message_urls(message)
     if not urls:
@@ -2056,6 +2103,23 @@ async def _handle_links(message: telegram.Message) -> None:
         # and calling the whole message unattempted would be false.
         for url in urls:
             record_rejection(message, url, UNSUPPORTED_ERROR, "")
+        # And on a handful of sites, silence is the wrong answer: somebody who pastes
+        # a TikTok is waiting for a video, and from the chat "I do not do that site"
+        # is indistinguishable from the bot being down. ONE reply for the message and
+        # not one per URL -- three TikToks pasted together are one question.
+        #
+        # Recording and replying are separate on purpose and in that order. Every
+        # unsupported URL is recorded whether or not anything is said, because the
+        # record is the roadmap input and the reply is courtesy to whoever is waiting;
+        # and the record goes first so a failing reply cannot cost it.
+        #
+        # Not wrapped in a try/except, like the insult reply and for the same reason:
+        # this file swallows an exception in exactly four places and each one is
+        # load-bearing. Nothing was delivered here and nothing is owed to the group,
+        # the ledger is already written, and the worst a failure can cost is the
+        # insult answer of the same message -- cheaper than a fifth silent swallow.
+        if any(_host_is_one_of(url, MEDIA_PLATFORM_HOSTS) for url in urls):
+            await _reply_text(message, UNSUPPORTED_MEDIA_REPLY)
         return
     for url in supported:
         await _deliver(message, url)
@@ -3811,6 +3875,15 @@ def _check_message_logging() -> None:
         # just that one: on_message can write to either now, and nothing here should
         # depend on the texts below never being read as an insult.
         real_rejected, real_insults = globals()["REJECTED_LEDGER"], globals()["INSULT_LEDGER"]
+        # The TikTok below is now answered in the chat, and this Message has no bot
+        # behind it to answer with. The reply itself is asserted where it belongs,
+        # in _check_unsupported_media_hosts_get_an_answer; here it is only silenced.
+        real_reply = globals()["_reply_text"]
+
+        async def _swallow(_message: object, _text: str, **_kwargs: object) -> None:
+            return None
+
+        globals()["_reply_text"] = _swallow
         with temp_workspace() as workspace:
             globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
             globals()["INSULT_LEDGER"] = workspace / "insults.jsonl"
@@ -3820,6 +3893,7 @@ def _check_message_logging() -> None:
             finally:
                 globals()["REJECTED_LEDGER"] = real_rejected
                 globals()["INSULT_LEDGER"] = real_insults
+                globals()["_reply_text"] = real_reply
         return messages
 
     no_url = deliver_nothing("che alguien vio el partido ayer")
@@ -3861,9 +3935,16 @@ def _check_unattempted_links_are_recorded() -> None:
         async def _fake_deliver(_message: object, url: str) -> None:
             delivered.append(url)
 
+        async def _swallow(_message: object, _text: str, **_kwargs: object) -> None:
+            return None
+
         real_deliver, real_ledger = globals()["_deliver"], globals()["REJECTED_LEDGER"]
-        real_insults = globals()["INSULT_LEDGER"]
+        real_insults, real_reply = globals()["INSULT_LEDGER"], globals()["_reply_text"]
         globals()["_deliver"] = _fake_deliver
+        # An unsupported MEDIA host now gets a line in the chat, and a telegram.Message
+        # with no bot behind it cannot send one. Only silenced here -- what is said,
+        # and to which hosts, is asserted in the check below this one.
+        globals()["_reply_text"] = _swallow
         with temp_workspace() as workspace:
             ledger = workspace / "rejected.jsonl"
             globals()["REJECTED_LEDGER"] = ledger
@@ -3879,6 +3960,7 @@ def _check_unattempted_links_are_recorded() -> None:
                 globals()["_deliver"] = real_deliver
                 globals()["REJECTED_LEDGER"] = real_ledger
                 globals()["INSULT_LEDGER"] = real_insults
+                globals()["_reply_text"] = real_reply
 
     # One unsupported URL.
     records, delivered, lines, raw = _run("miren https://www.tiktok.com/@a/video/1")
@@ -3948,6 +4030,118 @@ def _check_unattempted_links_are_recorded() -> None:
     assert f"{UNSUPPORTED_ERROR} -- 2" in report and "ExtractionError -- 1" in report, report
     assert "  tiktok.com -- 2" in report, report
     print("ok  a link the bot declined to try is recorded, separately from a bounce")
+
+
+def _check_unsupported_media_hosts_get_an_answer() -> None:
+    """A TikTok is told why nothing came back; a news article is still left alone.
+
+    THE SILENT HALF IS THE ONE THAT NEEDS ASSERTS. The decision this narrows --
+    "anything unsupported is left alone rather than attempted and apologised for" --
+    is still right for every URL that is not a video by construction, and a list that
+    quietly grows until it catches everything would undo it without anybody noticing.
+    So both halves are driven here, through the real on_message, with _deliver, both
+    ledgers and _reply_text swapped out. No network, no token.
+
+    The ledger is asserted alongside every case for the same reason: the record and
+    the reply have different audiences, and a change that ties one to the other --
+    "only record what we answered", or the reverse -- destroys the report that
+    decides which site gets supported next.
+    """
+
+    def _run(text: str) -> tuple[list[str], list[dict], list[str]]:
+        message = telegram.Message(
+            message_id=13,
+            date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
+            chat=telegram.Chat(id=-100123, type=telegram.Chat.GROUP),
+            from_user=telegram.User(id=1, first_name="u", is_bot=False),
+            text=text,
+        )
+        said: list[str] = []
+        delivered: list[str] = []
+
+        async def _fake_reply(_message: object, reply: str, **_kwargs: object) -> None:
+            said.append(reply)
+
+        async def _fake_deliver(_message: object, url: str) -> None:
+            delivered.append(url)
+
+        real = {name: globals()[name] for name in
+                ("_reply_text", "_deliver", "REJECTED_LEDGER", "INSULT_LEDGER")}
+        globals()["_reply_text"], globals()["_deliver"] = _fake_reply, _fake_deliver
+        with temp_workspace() as workspace:
+            globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+            globals()["INSULT_LEDGER"] = workspace / "insults.jsonl"
+            try:
+                with _capture_log(logging.INFO):
+                    asyncio.run(on_message(telegram.Update(update_id=1, message=message), None))
+                return said, read_rejections(globals()["REJECTED_LEDGER"]), delivered
+            finally:
+                globals().update(real)
+
+    # The case the owner named: a video site the bot does not do. One line, and the
+    # record too, because the two answer different questions.
+    said, records, delivered = _run("miren esto https://www.tiktok.com/@a/video/1")
+    assert said == [UNSUPPORTED_MEDIA_REPLY], f"a TikTok cannot look like a dead bot: {said}"
+    assert [r["url"] for r in records] == ["https://www.tiktok.com/@a/video/1"], records
+    assert delivered == [], delivered
+
+    # And the case the silence rule was written for. Still silent, still recorded.
+    for quiet in (
+        "https://www.lanacion.com.ar/algo/una-nota/",
+        "https://open.spotify.com/track/abc",
+        "https://docs.google.com/document/d/abc/edit",
+        "https://x.com/a/status/2",
+    ):
+        said, records, _delivered = _run(f"che miren {quiet}")
+        assert said == [], f"{quiet} is not a request for a video: {said}"
+        assert [r["url"] for r in records] == [quiet], records
+
+    # Three of them in one message is one question, so it gets one answer -- and
+    # three records, because which site recurs is the entire point of the ledger.
+    said, records, _delivered = _run(
+        "https://www.tiktok.com/@a/video/1 https://vm.tiktok.com/ZM2/ https://vimeo.com/3"
+    )
+    assert said == [UNSUPPORTED_MEDIA_REPLY], f"one reply per message, not per link: {said}"
+    assert len(records) == 3, records
+    # vm.tiktok.com is the short form TikTok's own share sheet produces, and it is a
+    # subdomain -- the same host rule the rest of the file uses has to cover it.
+    assert "https://vm.tiktok.com/ZM2/" in [r["url"] for r in records], records
+
+    # A mix of both kinds: one reply, and every URL still recorded.
+    said, records, _delivered = _run(
+        "https://www.lanacion.com.ar/nota/ y https://www.tiktok.com/@a/video/1"
+    )
+    assert said == [UNSUPPORTED_MEDIA_REPLY], said
+    assert len(records) == 2, records
+
+    # A message that also carried a supported link is not unattempted and is not
+    # answered: something WAS tried, and whatever it produced is the answer.
+    said, records, delivered = _run("https://www.tiktok.com/@a/video/1 y https://youtu.be/abc")
+    assert said == [] and records == [], (said, records)
+    assert delivered == ["https://youtu.be/abc"], delivered
+
+    # Ordinary chat is untouched by all of it.
+    said, records, delivered = _run("che alguien vio el partido ayer")
+    assert (said, records, delivered) == ([], [], []), (said, records, delivered)
+
+    # The list itself. A host in both frozensets would be dead configuration -- the
+    # supported one wins before this is ever consulted -- and it is the way this
+    # feature rots: somebody adds a site to SUPPORTED_HOSTS and leaves it here.
+    assert not (MEDIA_PLATFORM_HOSTS & SUPPORTED_HOSTS), \
+        f"a supported host can never reach this reply: {MEDIA_PLATFORM_HOSTS & SUPPORTED_HOSTS}"
+    assert MEDIA_PLATFORM_HOSTS, "an empty list makes the reply unreachable"
+    assert len(MEDIA_PLATFORM_HOSTS) <= 10, \
+        "this list answers; it does not become a chatbot. Grow it from the ledger, not from ideas"
+
+    # And the sentence a friend reads: Spanish, one short line, no jargon, and it
+    # does not promise a fix or list what does work.
+    assert UNSUPPORTED_MEDIA_REPLY == UNSUPPORTED_MEDIA_REPLY.lower(), UNSUPPORTED_MEDIA_REPLY
+    assert len(UNSUPPORTED_MEDIA_REPLY) <= 80 and "\n" not in UNSUPPORTED_MEDIA_REPLY
+    for jargon in ("http", "url", "host", "yt-dlp", "error", "tiktok"):
+        assert jargon not in UNSUPPORTED_MEDIA_REPLY, UNSUPPORTED_MEDIA_REPLY
+    assert UNSUPPORTED_MEDIA_REPLY != FAILURE_REPLY, \
+        "nothing was attempted here, so this is not the apology for a bounce"
+    print("ok  an unsupported video site gets one line; everything else still gets silence")
 
 
 # Everything the bot must answer, and everything it must stay quiet through. THE
@@ -4928,6 +5122,7 @@ def _self_check() -> None:
     _check_only_instagram_can_be_an_image_post()
     _check_transport_failures_are_retried()
     _check_unattempted_links_are_recorded()
+    _check_unsupported_media_hosts_get_an_answer()
     _check_insult_detection()
     _check_album_delivery()
     _check_failure_path()

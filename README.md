@@ -800,6 +800,7 @@ their pages without warning, and that is this project's real failure mode.
      because they are the entire diagnosis. Add the host to `SUPPORTED_HOSTS` if it belongs there.
      These also go in the ledger under `UnsupportedHost` (§5.1), so the question survives the
      window being closed: `bot.py --rejected` answers "what has this group been pasting".
+     **The group may also have been told, once, for that message** — see §5.4.
 3. **The bot stops seeing anything in a group** → it was probably demoted from administrator. See §3.
 4. **YouTube fails with missing formats** → the first suspect is the warning yt-dlp prints on every
    extraction: *"No supported JavaScript runtime could be found… extraction without a JS runtime has
@@ -1028,6 +1029,41 @@ untouched, so `bot.py --rejected` tells "the network was down for two attempts" 
 first-time failure without any record growing a field. Whoever is watching the terminal learns
 earlier — one `WARNING` line goes out between the attempts, while the link can still be saved.
 
+### 5.4 Silence, and the one place it is the wrong answer
+
+Every path through `on_message` says something when it cannot deliver — a named failure gets its
+Spanish line, an unrecognised one gets `no pude bajar ese link`, a file over the ceiling gets the
+direct link — with one exception that used to say nothing at all: **a URL on a host the bot does
+not support**. It was recorded in the ledger, logged once, and never mentioned in the chat. From
+inside the chat that is indistinguishable from the bot being dead.
+
+The decision behind that silence is still right and is **not** reversed: *a bot that answers "no
+pude bajar ese link" to every news article in the chat is worse than one that stays quiet.* A
+Spotify link, a Google Doc, a nota in La Nación — nobody pasting one of those is waiting for a
+video, and answering them all is how a useful bot becomes noise.
+
+So the exception is narrow: **`MEDIA_PLATFORM_HOSTS`** — sites where a link is a video by
+construction (TikTok, Twitch, Vimeo, Dailymotion, Streamable, Kick). One of those in a message
+earns exactly one line, `ese sitio no lo manejo, no puedo bajar ese link`, and nothing else does.
+
+Four things about it:
+
+- **One reply per message, not per URL.** Three TikToks pasted together are one question.
+- **The ledger still records every unsupported URL**, answered or not. The record is the roadmap
+  input (§5.1) and the reply is courtesy to whoever is waiting; tying either to the other would
+  destroy the report that decides which site gets supported next.
+- **It is not a step toward supporting those sites.** Nothing is downloaded from any of them.
+- **The list is judgement, not evidence, and that is its weak point.** The ledger is what should
+  grow it, and on 2026-08-10 it had nothing to say: 6 records, not one of them an `UnsupportedHost`
+  — this group pastes Instagram and essentially nothing else. **X/Twitter, Reddit and Pinterest are
+  deliberately absent**, because a link to one of those is as often an argument or a photo thread
+  as a video; they are the first candidates the day `bot.py --rejected` shows the group pasting
+  them. Do not add a host because it sounds likely.
+
+**"Bot caído" is the one cause the bot cannot report**, and nothing here pretends otherwise: a
+process that is not running sends no messages. No heartbeat, no watchdog, no status ping, no second
+process — the mitigation is the baton pass (§2.1), where somebody else starts hosting.
+
 ---
 
 ## 6. Deliberately not built
@@ -1048,7 +1084,8 @@ a preference.
 | A tie-break between two instances that were both told to take over | There is no channel to hold it on: different laptops, different networks, no shared state, and Telegram designates no winner (§4.9). A negotiation over the group chat would be visible to the friends and could still race. The two people can talk to each other; their bots cannot — so the standoff is announced in both windows and left to them. |
 | A JS runtime (`deno`, wiring `node`) | Extraction works without one today, measured. The port target argues against a new runtime dependency added to silence a warning. |
 | A local Telegram Bot API server for 2 GB uploads | Compiling tdlib for a ceiling meme-length clips rarely reach. |
-| TikTok support | Not requested, and the IP was blocked when it was probed. |
+| TikTok support | Not requested, and the IP was blocked when it was probed. A TikTok link now gets *told* the bot does not handle that site (§5.4); nothing is downloaded from it. |
+| A heartbeat, watchdog, status ping or second process to report "the bot is down" | A process that is not running cannot send a message, so this can only be answered from somewhere else — and the somewhere else is the baton pass (§2.1), which already exists and needs no daemon. |
 | An Instagram throwaway account and cookies | Unnecessary — anonymous extraction works (§4.7). |
 | Syncing the rejected-links ledger between hosts | It fragments by design (§5.1). A server or a shared database for ~20 links a week is exactly the cost this repo refuses; `cat` merges the files when the owner actually wants them merged. |
 | Playlists, channels, a dashboard, accounts, rate limiting | Out of scope, permanently. |
