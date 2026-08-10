@@ -717,6 +717,29 @@ constructed; nobody has posted a schemeless link into the real group and watched
 sends. The offsets are built the way the Bot API documents them, and that is an assumption until a
 real paste confirms it.
 
+**A URL no parser can read is answered "no", and it used to cost the whole message.** `urlparse`
+does not hand back an empty hostname for these — it raises `ValueError` — and the raise escaped
+`_handle_links`, so one malformed string meant the group got nothing at all for every good link in
+that same message. Two shapes were measured, both `ValueError`:
+
+| String | What `urlparse` says | Which source can produce it |
+|---|---|---|
+| `https://[::1/x` | `Invalid IPv6 URL` | entities only — `URL_PATTERN` excludes brackets |
+| a host with a **fullwidth** `#`, `/`, `@` or `:` | `netloc contains invalid characters under NFKC normalization` | **the regex**, from ordinary message text |
+
+The second row is why this guard does not depend on the open question above: `URL_PATTERN` accepts
+any non-space character, so plain text with no entity anywhere reaches the parser and raises. That
+half is confirmed.
+
+**The guard lives in `_host_is_one_of`, not in `is_supported`,** and the difference is not cosmetic.
+`is_supported` is not the only caller — `_handle_links` asks the same function about
+`MEDIA_PLATFORM_HOSTS` directly, on the raw URL list, *after* `is_supported` has filtered. Guarding
+one level up was measured and it **moves** the raise instead of removing it: a message whose only
+URL is unparseable still takes the handler down. One host rule, one guard, every caller inherits it.
+Answering is all it does; it validates nothing, and a URL that parses but is nonsense reaches yt-dlp
+exactly as before. The string is still recorded in the ledger by the unsupported path like any other
+bounced link, and `rejection_host()` already groups it under `?`.
+
 ### 4.12 Being called stupid — the only thing answered that is not a link
 
 The owner asked for it in these words: *"cada vez que lea 'bot estupido' en cualquier mensaje (o
