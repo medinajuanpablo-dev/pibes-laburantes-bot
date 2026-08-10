@@ -16,8 +16,14 @@ uncommitted in its own worktree, which is preserved and is not yours. So there i
 and `main` is the branch point. The earlier "branch after order 13 merges" line was written when that
 merge was expected.
 
-**Scope for this dispatch: SLICE 0 ONLY.** Checkpoint and report after it. Slices 1-3 stay unbuilt; the
-CEO owns scope and there is a time box closing at 18:01.
+**Scope history — read this before anything else:**
+
+- **Slice 0 is DONE and merged** (the token no longer reaches the log). Do not redo it, do not touch
+  `configure_logging` or `REQUEST_URL_LOGGER`. If you think slice 0 is wrong, say so and stop.
+- **Scope for THIS dispatch: slices 1, 2 and 3.** Branch from current `main` — which is now well past
+  the SHA below, because order 15 (the live-stream guard) landed in between. **Run
+  `git merge --ff-only main` first and report what it moved**: every worktree handed out on this project
+  so far has been several commits behind while its order said "current `main`".
 
 ### The defect, measured
 
