@@ -1592,8 +1592,40 @@ def _host_is_one_of(url: str, hosts: frozenset[str]) -> bool:
     handle this site" and "can this site have image posts" -- so a subdomain or a
     short form can never be read one way by one of them and the other way by the
     other. `m.instagram.com` is Instagram to both, or to neither.
+
+    AND IT ANSWERS "NO" RATHER THAN RAISING ON A STRING NO PARSER CAN READ. `urlparse`
+    does not return a hostname for these, it raises ValueError, and the answer to "is
+    this host one of ours" for a string that was never a URL is no -- not an
+    exception. Two shapes were measured, both ValueError and both reachable:
+
+      * `https://[::1/x` -- an unclosed bracket literal, "Invalid IPv6 URL". Only the
+        entity source can carry it; URL_PATTERN excludes brackets.
+      * `https://exam#ple.com/x` written with a FULLWIDTH '#' (or '/', '@', ':') --
+        "netloc contains invalid characters under NFKC normalization". URL_PATTERN
+        allows any non-space character, so **the regex source produces this one from
+        ordinary message text**, with no entity involved.
+
+    THE GUARD IS HERE AND NOT IN is_supported BECAUSE is_supported IS NOT THE ONLY
+    CALLER. _handle_links asks this function about MEDIA_PLATFORM_HOSTS directly, on
+    the raw url list, after is_supported has already filtered -- so a guard one level
+    up leaves that call exposed and a message whose only URL is unparseable still
+    takes the handler down. Measured: guarding is_supported alone moved the raise
+    rather than removing it. One rule, one guard, every caller inherits it.
+
+    Quiet on purpose, at no level: an unparseable string is not a failure of the bot,
+    so it gets the same silence as any other host that is not ours (README.md §5.4).
+    The URL is still recorded in the ledger by the unsupported path like any other
+    bounced link, and rejection_host already groups it under "?".
+
+    ponytail: this makes the question answerable, it does not validate URLs. A string
+    that parses but is nonsense reaches yt-dlp exactly as before, and neither source
+    stops emitting these -- find_urls and entity_urls hand them over and this says no.
+    That is the whole of it; nothing here tries to guess what the friend meant.
     """
-    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    try:
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return False
     return host in hosts or any(host.endswith("." + h) for h in hosts)
 
 
@@ -2804,6 +2836,37 @@ def _check_pure_helpers() -> None:
     ):
         assert not is_supported(url), f"{url} should not be supported"
     print("ok  is_supported")
+
+    # A string no URL parser can read is answered "no", never raised. urlparse does
+    # not return an empty hostname for these, it raises ValueError, and the raise used
+    # to escape _handle_links and cost the whole message -- every other link in it
+    # included.
+    #
+    # THE CONTROL ARM IS THE THREE LINES BELOW THE LOOP AND IT IS NOT DECORATION. The
+    # mutation this check exists to catch is the guard widened until the answer is
+    # "no" for everything: a guard around the whole body, or one that swallows more
+    # than ValueError, still passes the loop and breaks the entire product. A real
+    # reel must still be True and a news URL must still be False, asserted right here
+    # so no later edit can separate the pair.
+    for malformed in (
+        "https://[::1/x",            # unclosed bracket: "Invalid IPv6 URL"
+        "https://[::1]x/y",
+        "https://exam＃ple.com/x",  # fullwidth '#': fails the NFKC netloc check
+        "https://exam／ple.com/x",  # fullwidth '/'
+        "https://youtu.be＃/abc",   # and it does not become a supported host
+    ):
+        assert is_supported(malformed) is False, f"{malformed!r} must answer no, not raise"
+        assert has_image_posts(malformed) is False, f"{malformed!r} must answer no, not raise"
+        assert _host_is_one_of(malformed, MEDIA_PLATFORM_HOSTS) is False, malformed
+    assert is_supported("https://www.instagram.com/reel/DbGNFqVKnB-/") is True, \
+        "the guard widened until a real reel is unsupported -- this breaks the product"
+    assert is_supported("https://youtu.be/abc") is True, "the guard swallowed a good link"
+    assert is_supported("https://example.com/article") is False, "a news URL is still not ours"
+    # And the regex source really does produce the NFKC shape from plain text, with no
+    # entity anywhere: this path is not hypothetical the way the entity path still is.
+    assert find_urls("mira https://exam＃ple.com/x") == ["https://exam＃ple.com/x"], \
+        "URL_PATTERN allows any non-space character, so it emits this one"
+    print("ok  an unparseable URL is answered, not raised")
 
     # media_kind and the reply-method mapping.
     assert media_kind("clip.mp4", has_audio=True) == "video"
@@ -4490,6 +4553,47 @@ def _check_unattempted_links_are_recorded() -> None:
     )
     assert delivered == ["https://youtu.be/abc"], delivered
     assert records == [], records
+
+    # A URL NO PARSER CAN READ MAY NOT COST THE MESSAGE IT ARRIVED IN. This is the
+    # whole point of the guard in _host_is_one_of, and it is asserted through the real
+    # on_message because the raise it replaces did not happen in is_supported -- it
+    # happened wherever the handler asked about a host next, and there are two such
+    # places on this path.
+    #
+    # The reel is the load-bearing half: before the guard, one malformed string in the
+    # same message meant the group got nothing at all for a perfectly good link.
+    reel = "https://www.instagram.com/reel/DbGNFqVKnB-/"
+    text = f"mira {reel} y https://[::1/x"
+    records, delivered, lines, _raw = _run(
+        # Everything before the malformed URL is ASCII, so its Python index is also
+        # its UTF-16 offset. Computed rather than typed: a literal would drift the
+        # day this text changes and the entity would silently point at nothing.
+        text, telegram.MessageEntity(type="url", offset=text.index("https://[::1/x"), length=14),
+    )
+    assert delivered == [reel], f"the good reel must survive the malformed URL: {delivered}"
+    assert records == [], f"something was attempted, so nothing here is unattempted: {records}"
+    assert lines == [], lines
+
+    # The malformed URL on its own reaches the unsupported path and is recorded there
+    # like any other bounced link -- which is also the case that proves the guard
+    # covers the SECOND host question, the MEDIA_PLATFORM_HOSTS one. A guard placed on
+    # is_supported alone passes the case above and raises on this one.
+    records, delivered, lines, _raw = _run(
+        "mira https://[::1/x", telegram.MessageEntity(type="url", offset=5, length=14)
+    )
+    assert delivered == [], delivered
+    assert [record["url"] for record in records] == ["https://[::1/x"], records
+    assert records[0]["error"] == UNSUPPORTED_ERROR, records
+    assert len(lines) == 1 and "none on a supported host" in lines[0], lines
+    assert rejection_host("https://[::1/x") == "?", "the report groups it rather than dying on it"
+
+    # And the shape the REGEX produces, from plain text with no entity at all: a host
+    # carrying a fullwidth character fails urlsplit's NFKC check. Unlike the entity
+    # path, nothing about this one is waiting on a real paste to confirm it.
+    records, delivered, _lines, _raw = _run("mira https://exam＃ple.com/x")
+    assert delivered == [], delivered
+    assert [record["url"] for record in records] == ["https://exam＃ple.com/x"], records
+    assert records[0]["error"] == UNSUPPORTED_ERROR, records
 
     # And the report keeps the two piles apart, which is why the class exists.
     report = format_rejections([
