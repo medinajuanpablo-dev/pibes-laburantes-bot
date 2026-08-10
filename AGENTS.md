@@ -264,7 +264,22 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   the image fallback running for a site with no image posts — removed, inverted, moved after the
   probe (the calls are asserted, not only the outcome), `IMAGE_POST_HOSTS` widened to every
   supported host, emptied, or losing `instagr.am` · `_host_is_one_of` dropping its subdomain arm or
-  matching the URL as a substring · the bot-check row deleted, keyed on the apostrophe, written
+  matching the URL as a substring ·
+  `_host_is_one_of` losing its `ValueError` guard, so an unparseable URL raises out of `_handle_links`
+  and costs every good link in the same message · that guard **moved up into `is_supported`**, or
+  replaced by a `try` around the call-site comprehension — `_handle_links` asks `_host_is_one_of`
+  about `MEDIA_PLATFORM_HOSTS` directly, on the raw URL list, so either one **moves** the raise
+  instead of removing it and a message whose only URL is unparseable still kills the handler (the
+  call-site version also silently drops the good link) · the guard answering `True`, which feeds a
+  string no parser could read to yt-dlp · the guard keyed on the `Invalid IPv6 URL` **text** — the
+  other measured shape is a fullwidth `#`/`/`/`@`/`:` in the host, which `URL_PATTERN` does emit from
+  plain message text, so a message match reopens the half of the defect that needs no entity ·
+  the guard widened to `except Exception`: nothing else in that function raises, so the ONLY thing
+  that catches it is the assert that a non-string still propagates · the guard widened until a real
+  reel is unsupported — it passes a whole loop of malformed strings while breaking the entire
+  product, which is why the control arm sits in the same block · the `find_urls` assert that the
+  regex really does emit the fullwidth shape, without which that half looks hypothetical ·
+  the bot-check row deleted, keyed on the apostrophe, written
   with a capital, losing its `[youtube]` marker, or rewritten as a hedge ·
   `main` not registering `on_error` · the conflict handler's `quiet` branch ·
   `CONFLICT_GRACE` set to 0 (a probe would then kill a healthy bot) · the episode reset in
