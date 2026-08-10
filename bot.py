@@ -458,11 +458,12 @@ INSULT_LEDGER = Path(__file__).resolve().parent / "insults.jsonl"
 # --- The bot handing out its own installer --------------------------------------
 #
 # What a friend gets when they ask the bot how to run it. It is a MESSAGE and not a
-# file attachment, and that is forced, not chosen. A launcher on its own is inert --
-# run-bot.command's first act is `git pull` in a directory with no .git and its last
-# is `exec .venv/bin/python bot.py` with no bot.py next to it -- and a file that
-# arrives over the network carries com.apple.quarantine, which is exactly what
-# LaunchServices refuses, while a file written by git does not (README.md 2.1).
+# file attachment, and that is forced, not chosen. Do not reopen it by noticing that
+# a bootstrap which clones and hands off would not be inert: true, and not the
+# blocker. A double-clicked .command needs the exec bit AND no com.apple.quarantine,
+# and a file delivered by Telegram has neither -- measured 2026-08-09, all four
+# combinations, README.md 2.2. Right-click -> Open answers only the quarantine half,
+# and the chmod +x costs exactly the Terminal that sending a file was meant to save.
 #
 # So the thing worth sending is the one command that creates a real clone. That is
 # also the only shape that satisfies what the owner asked for in the same breath --
