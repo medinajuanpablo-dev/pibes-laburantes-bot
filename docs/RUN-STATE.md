@@ -1,10 +1,16 @@
 # CEO loop-state — Telegram meme bot
 
 ## Run
-- **Mode:** **AUTO** (open-ended, no time box, no `ask`) since **2026-08-09 17:15 -03**. Previously
-  GOAL from 2026-08-07 14:33. Objective at *directivo*: I source it.
-- **Docs loaded (AUTO re-stamp, round 0 / 2026-08-09 17:15):** modes ✓ · continuation ✓ · run-loop ✓ ·
-  audit ✓ · dispatch ✓ · loop-state-template ✓ — all read in this same session, none through a compaction.
+- **Mode:** **AUTO con caja de tiempo — 1 h**, re-invoked **2026-08-10 17:01 -03**, no `ask`.
+  **`Deadline: 2026-08-10 18:01 -03`** — measured once with `date`, never re-estimated. Crossing it
+  triggers *el aterrizaje* (5 steps), not a cut. Owner's direction this round: *"mejoras netas de valor
+  para el bot: más controles, asegurar funcionalidad, safeties."*
+  Previously AUTO open-ended since 2026-08-09 17:15; GOAL from 2026-08-07 14:33.
+- **Docs loaded (re-stamp after compaction, 2026-08-10 17:01):** modes ✓ · continuation ✓ ·
+  run-loop ✓ · dispatch ✓ — all four re-read from disk this round, after a compaction. `audit.md`
+  is re-read before the verdict, per the interrupt table.
+- **Reconciled doc vs repo at entry:** the doc ended at rounds 3-7 while `main` had advanced through
+  orders 09, 10 and 11. Fixed below rather than acted on stale.
 - **I am the live host.** The user went AFK at 17:15 and handed hosting to me: the bot runs from the
   **main tree** on the merged tip. Consequences that bind every agent from here on: **no second
   instance, no `getUpdates` from anywhere** (it steals the live poll), and the main tree is a live
@@ -164,3 +170,49 @@ second half, and it has no data yet.
 5. **I chained a destructive cleanup behind a check twice**, and both times the check failed and the
    cleanup ran anyway. The second time it removed a worktree holding an agent's uncommitted docs --
    which I read before touching, and which survived. Luck, not process, twice.
+
+## AUTO rounds 8-10 — reconciliation of what landed while the doc was stale
+
+| Landing | Verdict | Live layer |
+|---|---|---|
+| Order 09 — `/instalar` shrunk to a launcher link, after the owner said my version was over-built | APPROVED | RUN — all three variants sent to the real group |
+| Order 10 — Windows installs without git (`instalar-bot.cmd` bootstrap, `System32` full paths) | APPROVED | **UNVERIFIABLE** — no Windows machine exists in this run. Queued. |
+| Order 11 — a transport failure buys one retry; the network failure is named; an unsupported media host gets an answer | APPROVED, **after a salvage** | RUN — forced a transport failure with a dead proxy driving `download_into` alone: exactly two attempts, 3 s pause, 3.2 s total |
+
+**Order 12 was retired unbuilt.** I designed a deferred re-delivery queue; the owner killed it on the
+right ground — an in-memory queue dies with the process, so it cannot accumulate while the bot is off,
+which was the entire point. The surviving version (filter Telegram's own ~24 h backlog by message age)
+is in the queues **awaiting his call**, because it re-opens a measured decision.
+
+### The salvage, and three instrument errors of mine in one audit
+The order-11 agent died to a stall watchdog with slice 3 complete and **uncommitted**. I audited the
+dirty worktree on all four layers, committed it myself without authoring a character, rebased, merged.
+
+My own errors that round, all three in my *measurement*, not in the code:
+1. Forced the transport failure with a proxy that also killed Telegram, so `build_application` failed
+   before the path under test ran. Fixed by driving `download_into` alone.
+2. Called `is_transport_failure` on the wrapping exception instead of the inner one.
+3. Filtered the log for `"again"` when the line says `"once more"` — nearly concluded the retry never
+   fired. **I now read the log unfiltered before believing a negative.**
+
+### Consultation (not a landing): free hosting
+Owner asked for a free place to host. **I recommended against every cloud option**, and the reason is
+not resources — measured the live process at **30 MB RSS, 0.0% CPU idle**. It is the IP: Instagram
+blocks datacenter ASNs before rate-limiting, and this group is **14 of 14 Instagram**. Paying does not
+fix it either, since a residential proxy costs more than the server. Verified the current free tiers
+rather than reciting them: Render's free services sleep at 15 min and its background worker is paid,
+Fly has no free tier for new accounts, Railway's credit is hours. Left him a 5-minute `yt-dlp -F` test
+on a free Oracle VM that settles it with data instead of my reading.
+
+## AUTO round 11 — caja de 1 h, "más controles, safeties"
+
+**Frontier chosen: the only defect class here that takes the bot DOWN rather than making it answer
+badly — one message costing unbounded work.** Everything shipped since the baton pass makes the bot
+*say* the right thing; nothing bounds what one link can spend.
+
+| # | Decision | Why | Reversible? |
+|---|---|---|---|
+| 8 | Order 13 = live-stream guard + per-message link cap, one agent, two slices | Both are unbounded-work holes found by reading `_ydl_options` and `_handle_links`. Fits the box; a third slice would not. | Yes |
+| 9 | Ordered slice 1 to be **allowed to build nothing** if the risk is not real | I did not reproduce it — I refused to start an unbounded download on the machine hosting production. A guard against a fiction is worse than no guard. | Yes |
+| 10 | Did **not** order a pre-flight size check | The oversize path already behaves correctly, just wastefully (downloads 73 MB then refuses). And a `filesize_approx` filter may be vacuous on Instagram for the same reason `height` is — unmeasured. Queued with the measurement it needs. | Yes |
+| 11 | Followed the owner's hardening direction rather than re-running the portfolio argument | He named the direction explicitly this round. The portfolio is not skewed: the last landings were capability (launchers, `/instalar`, named failures, unsupported hosts). | Yes |
