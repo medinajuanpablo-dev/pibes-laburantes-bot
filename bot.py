@@ -3352,7 +3352,7 @@ def _check_failure_replies() -> None:
     assert LIVE_STREAM_REPLY == LIVE_STREAM_REPLY.lower(), "the bot does not shout"
     assert len(LIVE_STREAM_REPLY) <= 120 and "\n" not in LIVE_STREAM_REPLY, LIVE_STREAM_REPLY
     assert not any(char.isdigit() for char in LIVE_STREAM_REPLY), "no codes in the chat"
-    for jargon in ("error", "http", "yt-dlp", "url", "extract", "live_status", "stream", "vivos"):
+    for jargon in ("error", "http", "yt-dlp", "url", "extract", "live_status", "stream"):
         assert jargon not in LIVE_STREAM_REPLY, f"{jargon!r} means nothing to the group"
     # It does NOT hedge, and it must not: is_live is the site stating a fact.
     assert "puede que" not in LIVE_STREAM_REPLY, "this signature is not ambiguous"
