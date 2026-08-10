@@ -55,6 +55,10 @@ rem the same thing the clone command already does. Ceiling: a friend may not fin
 rem the folder in Explorer's "Documents". Upgrade path if that bites, for both
 rem paths at once: read the real Shell Folders path out of the registry.
 set "TARGET=%USERPROFILE%\Documents\pibes-laburantes-bot"
+rem Every expansion of it below is quoted, echoes included: a Windows account name
+rem may legally contain "&", and an unquoted one in an echo would end the command
+rem there and try to run the rest of the path. Quotes in the printed line are the
+rem cheap half of that trade.
 
 set "ARCHIVE=%TEMP%\the-bot-main.tar.gz"
 set "CURL=%SystemRoot%\System32\curl.exe"
@@ -65,7 +69,7 @@ set "STAMP=.tarball-install"
 
 echo the-bot
 echo -------
-echo Carpeta: %TARGET%
+echo Carpeta: "%TARGET%"
 echo.
 
 rem --- 1. What this needs, and what happens when it is missing -------------------
@@ -171,10 +175,10 @@ goto :fail
 echo Lo que baje llego cortado. Volve a abrir este archivo y probamos de nuevo.
 goto :fail
 :nofolder
-echo No pude crear la carpeta %TARGET%. Fijate que tengas lugar en el disco.
+echo No pude crear la carpeta "%TARGET%". Fijate que tengas lugar en el disco.
 goto :fail
 :nounpack
-echo No pude desempaquetar el bot en %TARGET%. Volve a abrir este archivo y probamos de nuevo.
+echo No pude desempaquetar el bot en "%TARGET%". Volve a abrir este archivo y probamos de nuevo.
 goto :fail
 :nolauncher
 echo Baje el bot pero falta run-bot.cmd, que es lo que lo prende. Avisale al dueno.

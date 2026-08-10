@@ -121,7 +121,10 @@ stamp it has no updater at all, and it says so.
 **Both Windows files were written on a Mac and neither has ever run on Windows** — `run-bot.cmd` and
 `instalar-bot.cmd`. They are checked only for what is checkable from macOS: ASCII-only text, CRLF
 line endings, every `goto` has a label, no `if cond a & b` (which chains unconditionally), no
-unescaped `&` inside a `for /f`. Say **untested**, in that word, until somebody watches them.
+unescaped `&` inside a `for /f`, `set "VAR=value"` always quoted, and **every expansion of a path
+quoted, `echo` included** — a Windows account name may legally contain `&`, and an unquoted
+`echo … %TARGET%` would end the command there and try to run the rest of the path. Say **untested**,
+in that word, until somebody watches them.
 
 ### The bootstrap: what was measured here, and what could not be
 
