@@ -236,3 +236,16 @@ supported. Value does not depend on measuring whether Telegram's own parser emit
 cannot be measured without a human paste, per the exercise contract), because the guard covers *any*
 unparseable URL from *any* source. Also worth a must-stay-red entry: the list has several `entity_urls`
 rows and **none** for a malformed URL from an entity crashing the handler.
+
+### The find of the round — the bot prints its own token, ~360 times an hour
+Found while checking that the process I host is healthy (it is: 203 polls, **zero** ERROR or WARNING
+lines, gates green on the tip). The health check is what surfaced it.
+
+| | |
+|---|---|
+| Measured | **208 lines containing the live token** in `/private/tmp/bot-live.log` between 16:39:25 and 17:14:11 — 34m46s, so **~360/hour, ~8600/day** |
+| Mechanism | `logging.basicConfig(level=INFO)` sets INFO on the **root** logger → `httpx`'s request log turns on → httpx logs full URLs → every Telegram URL embeds the token. `grep httpx bot.py` finds only comments; nothing silences it. |
+| Control arm | `git grep 8688204214` → **empty**. The token is not in git, so the existing protections work. **The log is a third channel nobody covered.** |
+| Why it is severe on a friend's machine | The launcher does **not** redirect stdout, so the token prints into the visible Terminal window ~6×/minute. The likeliest support request this project will ever get is *"mirá, no anda"* plus a screenshot or paste of that window — which is full control of the bot. |
+| My own share of it, stated | The **file path is mine** (I redirected stdout when I took over hosting) and it was world-readable, `-rw-r--r--` inside `drwxrwxrwt /private/tmp`, until I chmodded it 600 at 17:14. The leak is the bot writing the token to stdout; my redirect only made it durable. |
+| Where it went | **Order 14 slice 0**, ahead of the URL work, with the fix shaped as silencing the logger (fails closed) rather than a redaction filter (has to be right about every future URL format, and is silent when wrong). |
