@@ -1,4 +1,6 @@
-# PROMPT-ORDER 14 — one unparseable URL costs the whole message
+# PROMPT-ORDER 14 — the bot prints its own token, and one bad URL costs a whole message
+
+> **Slice 0 is the severe one and it was found after the rest of this order was written.** Do it first.
 
 > Self-contained. Written 2026-08-10 17:15 -03. **Re-verify every claim against the live repo** — this
 > order is built on a probe I wrote myself, and roughly half of this project's false findings have been
@@ -63,6 +65,59 @@ second instance. No `.env` in your worktree and you do not need one. **No live s
 checks only; the live layer is the CEO's after merge.
 
 ## THE WORK
+
+### Slice 0 — the bot prints its own token about 360 times an hour
+
+**Measured on the live process I am hosting right now**, `/private/tmp/bot-live.log`:
+
+```
+2026-08-10 16:39:25 INFO HTTP Request: POST https://api.telegram.org/bot<TOKEN>/getMe "HTTP/1.1 200 OK"
+...
+208 lines containing the literal token, between 16:39:25 and 17:14:11  →  ~360/hour, ~8600/day
+```
+
+The mechanism, verified by grep — **re-verify it, this is my read**:
+
+- `logging.basicConfig(level=logging.INFO, ...)` (near line 2417) sets **INFO on the root logger**, which
+  switches on `httpx`'s own request log.
+- httpx logs the **full URL**, and every Telegram API URL embeds the token:
+  `https://api.telegram.org/bot<TOKEN>/getUpdates`.
+- `grep -n "httpx" bot.py` finds only comments. **Nothing silences that logger.**
+
+**Why this is the most serious thing in this order.** Design law 4 says secrets never enter git and
+never enter a chat message. Both hold — I checked, the token is not in git. **The log is a third
+channel nobody covered**, and it is the one a non-technical friend will hand over: the launcher does
+not redirect stdout, so on their machine those lines go to the visible Terminal window, ~6 per minute
+forever. The single most likely support request in this project's life is *"mirá, no anda"* with a
+screenshot or a paste of that window. That paste is full control of the bot: read every message in the
+group and post as the bot.
+
+My own contribution, stated so you can discount it: **the file path is mine** — I redirected stdout
+when I took over hosting, and it was world-readable (`-rw-r--r--` in `drwxrwxrwt /private/tmp`) until I
+chmodded it to 600 at 17:14. The leak is not the redirect, it is the bot writing the token to stdout;
+the redirect only made it durable. The friends' path leaks it to a screen instead of a file.
+
+The work: **the token must not appear in the bot's output at all.**
+
+- The cheapest correct fix is silencing the offending logger, not filtering strings. **Verify which
+  logger actually emits it** (`httpx` is my read from the line format — confirm it) and set its level so
+  the URL lines stop, **without silencing anything the bot itself logs.** The launcher's window is the
+  only diagnostic a friend has: deliveries, failures, the conflict lines and the retry line must all
+  still appear. Check that they do.
+- **A redaction filter is the wrong shape here** and I do not want it: it has to be right about every
+  future URL format, and being wrong is silent. Silencing a logger fails closed. If you disagree after
+  measuring, say why rather than building it.
+- Confirm the bot still *works* after the change — the self-check exercises the real API, so a
+  mis-scoped `setLevel` that breaks the client will show up there.
+
+*Check:* assert that the logger which prints request URLs is configured above INFO after the bot sets
+logging up, **and** that `the-bot`'s own logger still emits at INFO. Both halves matter: a check on only
+the first passes if you silenced everything. If you can drive one real API call in the existing
+self-check harness and assert the token is absent from what it wrote, better — but do not add a seventh
+download for it.
+
+*Commit.* Then note in `README.md` §5 that the launcher window no longer shows the token, because
+"is it safe to send you my window?" is a question a friend will actually ask.
 
 ### Slice 1 — `is_supported` answers the question instead of raising
 
