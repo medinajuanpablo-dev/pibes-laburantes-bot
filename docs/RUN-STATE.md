@@ -66,7 +66,7 @@ never proved the bot sends one. Different claims.**
 | **Trap measured 2026-08-10 17:15** | **macOS TCC can revoke the whole project mid-run** — `stat` keeps working while every `open()`/`listdir()` returns `EPERM`, for the CEO *and* every agent, **and it reproduces with the sandbox disabled** so it is not the Claude sandbox. Owner clears it with Full Disk Access. **`/private/tmp` stays writable**: write the handoff there first, then copy it in. The live bot is unaffected — its handles predate the lockout. |
 | **Trap measured 2026-08-10** | **A live link is an unbounded download**: ~6 MB/min forever, and `temp_workspace`'s cleanup never runs because it is a `finally` on a `download_into` that never returns. Probe it only in a child process with a hard `SIGKILL`. |
 | **Trap in the field names** | `was_live` is `True` for a **finished** stream, which is an ordinary bounded video and must still be delivered. A live guard keyed on it silently rejects every replay. Use `is_live` or `live_status == 'is_live'`. |
-| **The bot's log** | The live process writes to `/private/tmp/bot-live.log` (my redirect). **It contains the token** until order 14 slice 0 lands — I chmodded it 600 at 17:14. Read it with `sed 's/bot[0-9]*:[A-Za-z0-9_-]*/bot<TOKEN>/'`. |
+| **The bot`s log** | `/private/tmp/bot-live.log` (my redirect). **Clean since order 14 slice 0** — 0 token lines. The pre-fix log is kept at `/private/tmp/bot-live-pre-fix.log`, mode 600, and DOES contain the token. **Liveness is now `pgrep` + `lsof -p <pid> -i -a | grep -c ESTABLISHED` (expect 2)** — counting `getUpdates` lines no longer works, they were the httpx log. |
 
 ### Acceptance criteria of the original GOAL — all seven verified
 Criteria 1-3 and 5-7 were closed during the GOAL session (`run-history/01-goal-session.md`).
@@ -350,3 +350,39 @@ noticed the lockout at all.
 worktrees, so a blind `git add -A` would commit them. `.gitignore` is config, which the role counts as
 code, so it is an order, not mine — and it is small enough to ride along with the next one rather than
 earn its own.
+
+### Landing — order 14 slice 0: the log stops printing the token. **APPROVED**, four layers.
+`main` = `18713e9`. Merged by rebase, so the commit SHA changed — **verified by the `bot.py` blob**
+(`34538076…`, identical to what I gated), not by the SHA.
+
+| Layer | Evidence |
+|---|---|
+| **Gates** | `py_compile` OK and `--self-check` **passed** in the agent's worktree *before* the trunk, and again on the trunk after the merge. Still exactly six downloads. `git status --short` clean apart from untracked `.claude/`. |
+| **Diff faithful** | The commit touches **only** `bot.py`, `README.md`, `AGENTS.md` — its territory. (`git diff main..branch` also showed my doc commits as deletions; that is a branch-point artifact, confirmed by diffing the commit itself.) |
+| **Live — RUN** | Killed the old host, restarted on the merged tip with a fresh log. **Token occurrences: 350 before → 0 after.** All the bot's own lines still there (`polling; privacy mode…`, `only one instance can poll…`, `Application started`), and 2 established connections to Telegram prove it is really polling. |
+| **Adversarial** | The agent shipped 6 mutations, all red. **I re-ran two myself, one in each direction:** the `setLevel` deleted → *"a request URL reached the log with the token in it"* with the leaked line quoted; and the level widened onto the root logger → *"the bot's own INFO lines no longer reach the log"*. The present-but-wrong half — the half `audit.md` says gets skipped — is genuinely covered. |
+
+**Why the check is not vacuous:** it drives a **real `httpx.Client` over `MockTransport`** with a fake
+token in the URL and asserts both halves in one capture. A level-number assertion would keep passing the
+day the request log moves to a name nothing silences — the agent proved that with a mutation renaming
+`REQUEST_URL_LOGGER` to `httpcore`.
+
+### A consequence I did not anticipate: the fix killed my own liveness instrument
+The old check was *"count `getUpdates` lines in the log"*. Those lines **were** the httpx log, so they are
+gone — the new log is 3 lines and stays that way. **New instrument, measured:** `pgrep -f bot.py` plus
+`lsof -p <pid> -i -a | grep -c ESTABLISHED` → **2** established connections. Recorded in the contract.
+Nothing was wrong with the landing; my instrument was downstream of the leak.
+
+### The trap that hit BOTH orders this round
+**A fresh agent worktree does not branch from current `main`.** Order 13's sat at `0651e21`, order 14's at
+`0651e21` too — **7 commits behind** — while both orders said *"branch from current `main`"*. The delta was
+docs-only both times, so nothing was built on a stale base, but I asserted it twice and was wrong twice.
+**Every future order gets: *"your worktree may be behind — run `git merge --ff-only main` first and say
+what it moved."*** Both agents worked it out themselves; that is luck, not process.
+
+### My fifth error of the round, caught by the agent
+I wrote *"the self-check exercises the real API, so a mis-scoped `setLevel` that breaks the client will
+show up there."* **False twice over:** nothing in `--self-check` reaches the Telegram API (every
+`build_application` there uses a shaped fake token and is replaced before any poll), and a `setLevel`
+cannot break an HTTP client — it only decides whether a record is emitted. The real confirmation is inside
+the agent's own check: the request completes with the new config in force.
