@@ -249,3 +249,76 @@ lines, gates green on the tip). The health check is what surfaced it.
 | Why it is severe on a friend's machine | The launcher does **not** redirect stdout, so the token prints into the visible Terminal window ~6×/minute. The likeliest support request this project will ever get is *"mirá, no anda"* plus a screenshot or paste of that window — which is full control of the bot. |
 | My own share of it, stated | The **file path is mine** (I redirected stdout when I took over hosting) and it was world-readable, `-rw-r--r--` inside `drwxrwxrwt /private/tmp`, until I chmodded it 600 at 17:14. The leak is the bot writing the token to stdout; my redirect only made it durable. |
 | Where it went | **Order 14 slice 0**, ahead of the URL work, with the fix shaped as silencing the logger (fails closed) rather than a redaction filter (has to be right about every future URL format, and is silent when wrong). |
+
+### Order 13 — returned with NO code, and its measurement is the valuable half
+The agent was killed by the same OS lockout that hit me (below). **Nothing shipped.** Its worktree
+`.claude/worktrees/agent-a34638c67b88f2b8a` (branch at `db65ec1`) is **preserved deliberately**, holding
+**22 additive uncommitted lines** I read before deciding: `LIVE_STREAM_REPLY` plus
+`class LiveStreamError(ExtractionError)`, both well-commented, both unwired. The agent recommended
+discarding them; **I kept them instead**, because they are the design's foundation and a successor
+continued in that same worktree keeps the WIP (`dispatch.md` → Agent death, item 3).
+
+**Slice 1's risk is now a measured fact, not my read.** It drove the unguarded `download_into` against
+`youtube.com/watch?v=X4VbdwhkE10` in a child process with a hard 20 s `SIGKILL`:
+
+```
+exited on its own = False
+bytes on disk     = 2,097,152 (X4VbdwhkE10.mp4.part)
+growth            = monotonic, ~104 kB/s = ~6.3 MB/min = ~375 MB/h on an audio-dominant stream
+```
+
+Mechanism from the installed yt-dlp: `hls.py`'s `can_download` yields `not is_live`, so live routes to
+`FFmpegFD`, which writes until stopped. **Worse than I had it:** `temp_workspace`'s cleanup is a
+`finally` that only runs when `download_into` returns, and on a live link it never returns — so the
+`.part` grows unbounded for the life of the process, and delivery being serial, that one message is the
+whole bot. It disclosed spending a bounded ~2 MB on the production host to get this; I had refused to.
+
+**The trap it caught, which would have shipped a silent regression:**
+
+| URL | `is_live` | `live_status` | `was_live` | `duration` | must be |
+|---|---|---|---|---|---|
+| `watch?v=X4VbdwhkE10` (live) | `True` | `is_live` | `False` | `None` | **refused** |
+| `watch?v=jNQXAC9IVRw` (ordinary) | `False` | `not_live` | `False` | 19 | accepted |
+| `watch?v=zo5oewEQbsE` (**finished** stream) | `False` | `was_live` | **`True`** | 1146 | **accepted** |
+
+`was_live` is `True` for exactly the case that must NOT be refused. Correct read: `is_live` truthy **or**
+`live_status == 'is_live'`, nothing else.
+
+**Design it left, so the expensive part is never re-derived:** `is_live_stream(info)` pure;
+`_refuse_live(info, *, incomplete=False)` wired as `_ydl_options["match_filter"]` — **never return
+yt-dlp's `NO_DEFAULT` sentinel, it makes yt-dlp prompt on `input()`** and nobody is at the terminal;
+raise `LiveStreamError` **before** the `path is None` check or the refusal misreports as "left no file";
+`_deliver` picks the reply from the **exception class**, never a string, so no `FAILURE_SIGNATURES` row
+is keyed on the bot's own sentence. `match_filter` fires before any bytes — `_match_entry` is consulted
+from `process_video_result` (~line 3042) before format selection — **read from source, never run.** The
+first thing to do when this resumes is that bounded re-run expecting 0 bytes.
+
+**Slice 2 unbuilt, proposed:** `MAX_LINKS_PER_MESSAGE = 5`, first 5 delivered, one Spanish line for the
+message. At ~8.7 s/link that is ~43 s, the same order as the 43 s a transport failure already costs.
+
+### Four things my order 13 got wrong on fact — all four caught by the agent
+1. *"Committed as `db65ec1`, so it is in your worktree"* — **false**, the worktree branched from
+   `0651e21`. Same root cause as the fast-forward problem already logged: **I commit the order to `main`
+   after the branch point.** This has now cost two orders. Fix: state the branch point as the SHA the
+   worktree will actually have, or tell the agent to `merge --ff-only main` first.
+2. *"If the metadata does not mark it, use a size or duration ceiling instead"* — **that branch was
+   never viable.** On a live stream `duration`, `filesize` and `filesize_approx` are all `None`. A
+   ceiling cannot fire on a live stream at all; it would have shipped a guard that never runs plus false
+   positives on long ordinary videos.
+3. *"`_simulate_options`"* — does not exist; the metadata-only path is `_no_formats_ok`.
+4. *"Twitch, now that order 11 added those hosts"* — wrong list. `twitch.tv` is in
+   `MEDIA_PLATFORM_HOSTS`, asserted disjoint from `SUPPORTED_HOSTS`. Live exposure is **YouTube,
+   Instagram and Facebook only**, and only YouTube is measured.
+
+My field-name hedge was right to hedge — but the trap was `was_live`, not the names I doubted.
+
+### The blocker that ate 20 minutes of the box
+**macOS revoked read access to the whole project at ~17:15**, for me and for the agent: `stat` worked,
+every `open()`/`listdir()` returned `EPERM`, **and it reproduced with the sandbox disabled**, so it was
+not the Claude sandbox — TCC on `~/Documents`. Cleared by the owner at ~17:35 (Full Disk Access).
+
+What survived and why: **the live bot never noticed** (pid 48057, its file handles predate the
+lockout — 203+ polls, zero ERROR lines), and everything of mine was already committed and pushed. The
+one thing I could still write was `/private/tmp`, so the agent's measurements went into a handoff there
+before this section existed. **Standing note for any future run: `/private/tmp` stays writable when the
+project does not — write the handoff there first, then copy it in.**
