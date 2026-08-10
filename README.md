@@ -22,29 +22,37 @@ Long-polling client, not a server. No inbound port, no webhook, no TLS to manage
 
 ```
 Telegram update
-  └─ on_message                    filters: real messages only, text or caption
-       ├─ message_urls(message)    the union of two sources, de-duplicated
-       │    ├─ find_urls(text)          regex, http(s):// required
-       │    └─ entity_urls(message)     Telegram's own `url` entities, so a
-       │                                schemeless youtu.be/xyz is seen too
-       ├─ is_supported(url)        host allow-list; everything else is logged AND
-       │                           written to the ledger as UnsupportedHost
-       └─ _deliver(url)
-            ├─ temp_workspace()          mkdtemp, removed in a finally
-            ├─ download_into()           yt-dlp, format MEDIA_FORMAT, merged by ffmpeg if needed
-            │     └─ on DownloadError → _image_fallback()   is the post merely video-less?
-            │            ├─ is_image_post()          no formats + thumbnails + not a carousel
-            │            │     └─ _download_best_thumbnail()  fetch all, keep the largest file
-            │            └─ carousel_slides()        every entry an image, 2 or more
-            │                  └─ _download_carousel_slides()  the same rule, per slide
-            ├─ delivery_kind()           album when there are slides, else media_kind()
-            ├─ delivery_decision()       real bytes on disk vs the per-kind ceiling
-            │     ├─ "file" → _send()        reply_video / reply_photo / reply_animation
-            │     │        → _send_album()   reply_media_group, open files, 2-10 slides
-            │     └─ "link" → oversize_reply()  a Spanish message carrying the direct URL
-            ├─ record_rejection()        anything that was not delivered lands in rejected.jsonl
-            └─ except → _apologise()     failure_reply() names the cause when it can, else
-                                         FAILURE_REPLY; own timeouts, never re-raises
+  └─ on_message                  filters: real messages only, text or caption
+     │
+     ├─ _handle_links(message)   FIRST, because _deliver cannot raise
+     │   ├─ message_urls(message)    the union of two sources, de-duplicated
+     │   │    ├─ find_urls(text)         regex, http(s):// required
+     │   │    └─ entity_urls(message)    Telegram's own `url` entities, so a
+     │   │                               schemeless youtu.be/xyz is seen too
+     │   ├─ is_supported(url)        host allow-list; everything else is logged AND
+     │   │                           written to the ledger as UnsupportedHost
+     │   └─ _deliver(url)
+     │        ├─ temp_workspace()          mkdtemp, removed in a finally
+     │        ├─ download_into()           yt-dlp, format MEDIA_FORMAT, merged by ffmpeg if needed
+     │        │     └─ on DownloadError → _image_fallback()   is the post merely video-less?
+     │        │            ├─ has_image_posts(url)     Instagram, or no fallback at all
+     │        │            ├─ is_image_post()          no formats + thumbnails + not a carousel
+     │        │            │     └─ _download_best_thumbnail()  fetch all, keep the largest file
+     │        │            └─ carousel_slides()        every entry an image, 2 or more
+     │        │                  └─ _download_carousel_slides()  the same rule, per slide
+     │        ├─ delivery_kind()           album when there are slides, else media_kind()
+     │        ├─ delivery_decision()       real bytes on disk vs the per-kind ceiling
+     │        │     ├─ "file" → _send()        reply_video / reply_photo / reply_animation
+     │        │     │        → _send_album()   reply_media_group, open files, 2-10 slides
+     │        │     └─ "link" → oversize_reply()  a Spanish message carrying the direct URL
+     │        ├─ record_rejection()        anything that was not delivered lands in rejected.jsonl
+     │        └─ except → _apologise()     failure_reply() names the cause when it can, else
+     │                                     FAILURE_REPLY; own timeouts, never re-raises
+     │
+     └─ _handle_insult(message)  the one thing it answers that is not a link
+         ├─ insult_words(text)       "bot estupido", either order, typos and all — §4.12
+         ├─ record_insult()          insults.jsonl: when, chat, message, the two words
+         └─ _reply_text()            "Lo lamento, hago lo que puedo"
 ```
 
 The split that matters: **everything above `_deliver` is pure and testable without a network or a
@@ -58,6 +66,8 @@ token.** That is what makes the self-check possible.
 | `entity_urls(message)` | every `url` entity Telegram marked, with `https://` added when it has no scheme — §4.11 |
 | `message_urls(message)` | the union of the two, regex first, de-duplicated |
 | `is_supported(url)` | host is in `SUPPORTED_HOSTS` or a subdomain of one |
+| `has_image_posts(url)` | host is Instagram, the only site that has image posts — §4.8 |
+| `insult_tokens(text)` / `insult_words(text)` | the message as bare words, and the two that insulted the bot — §4.12 |
 | `media_kind(path, has_audio)` | `photo` by suffix · `animation` for `.gif` **or a silent clip** · else `video` |
 | `reply_method_name(kind)` | the `telegram.Message` method that renders that kind inline |
 | `upload_ceiling(kind)` | 10 MiB for photos, 50 MiB for everything else |
@@ -505,6 +515,62 @@ constructed; nobody has posted a schemeless link into the real group and watched
 sends. The offsets are built the way the Bot API documents them, and that is an assumption until a
 real paste confirms it.
 
+### 4.12 Being called stupid — the only thing answered that is not a link
+
+The owner asked for it in these words: *"cada vez que lea 'bot estupido' en cualquier mensaje (o
+cualquier variante como 'estupido bot' o 'vot estupido' o letras faltantes) debe registrarlo y
+responder 'Lo lamento, hago lo que puedo'"*. So `insult_words()` reads every message, and a hit
+gets that sentence verbatim plus one line in `insults.jsonl`.
+
+**The false-positive side is the whole design.** This runs on every message a group of friends
+sends all day; a bot that apologises when nobody insulted it is worse than one that misses a typo,
+and it is also the failure nobody can debug from the chat. Three rules do the work, each earned by
+a phrase that broke a simpler one:
+
+| Rule | What it stops | Measured |
+|---|---|---|
+| **Both words, and near each other** — within `INSULT_MAX_GAP` = 1 token | *"sos un estupido"* (a person), *"gracias bot"*, and *"el bot funciona, no seas estupido vos"* — both words, four apart | the pair is the signal; either word alone is ordinary chat |
+| **A token may not be longer than the word it matches** | *"esa bota estupida"*, *"el boton estupido"* | difflib scores `bota`→`bot` at **0.857** and `boton`→`bot` at **0.750**; a typo drops or changes a letter, a longer word is a different word |
+| **One threshold per word**, not one for both | *"abri el bot, estudio despues"* | `estudio`→`estupido` is **0.800**, so the threshold is 0.85; `vot`→`bot` is **0.667**, so that one is 0.66 |
+
+The thresholds are `0.66` for `bot` and `0.85` for `estupido`, and each sits in a gap that was
+measured rather than guessed:
+
+| | lowest thing that must fire | highest thing that must not | threshold |
+|---|---|---|---|
+| `bot` | `vot` / `bo` / `ot` — **0.667**, one letter of three | `no` — 0.400, `o` — 0.500 | **0.66** |
+| `estupido` | `estupida` — **0.875**, `estupdo` — 0.933 | `estudio` — **0.800** | **0.85** |
+
+0.667 on a three-letter word is exactly "one of the three letters is wrong", which is where a typo
+stops being a typo — the reason a single threshold cannot serve both words. Before either number
+is moved, the phrase that motivates it has to be one the group actually sent; the two corpora in
+the self-check (25 that must fire, 37 that must not) are where it goes.
+
+Normalisation is `unicodedata` and `re`, no dependency: NFD minus the combining marks makes
+*estúpido* and *estupido* one word, casefold makes shouting match, splitting on anything outside
+`a-z` turns punctuation and emoji into separators, and a run of one letter collapses so
+*estupidoooo* and *bott* are the words they are meant to be — neither target word has a doubled
+letter, so nothing is lost.
+
+**Known misses, all deliberate.** `botestupido` written without the space (nothing joins tokens,
+and the owner did not ask for it); `robot estupido`, because difflib scores `robot`→`bot` and
+`boton`→`bot` identically at 0.750 and refusing the button is worth losing the robot; and anything
+further apart than one word, like *"el bot es un estupido"*. A missed joke costs nothing.
+
+**The record is its own file, not the ledger** (§5.1 is about links, and its report opens with "N
+links bounced"), and it carries `when`, `chat_id`, `message_id` and **the two matched words**. Two
+words is a deliberate exception to "no message bodies", argued rather than assumed: by
+construction they are near-copies of `bot` and `estupido` — that is the only way they matched — so
+they cannot carry anything private, and they are the only thing that can tell the owner a hit was
+*wrong*. Dates alone cannot be audited: a false positive and a real insult look identical, and no
+threshold could ever be moved on evidence. Their similarity scores are not stored because they are
+recomputable from the words.
+
+**Nobody has been insulted by a real person yet.** Every phrase in both corpora was written by an
+agent imagining how this group types. That is the honest status of the numbers above: they
+separate two invented lists cleanly, and the first real false positive is worth more than all of
+them.
+
 ---
 
 ## 5. Operations — what actually breaks
@@ -549,7 +615,9 @@ their pages without warning, and that is this project's real failure mode.
 ### 5.1 The rejected-links ledger
 
 Every link that does **not** end in delivered media appends one JSON line to `rejected.jsonl`, next
-to `bot.py`. Gitignored — it is the group's content.
+to `bot.py`. Gitignored — it is the group's content. **Links only**: an insult is not a bounce and
+has its own file (§4.12), because this report opens with "N links bounced" and groups by host, and
+it is the one signal that decides which site to support next.
 
 ```sh
 .venv/bin/python bot.py --rejected
@@ -699,6 +767,7 @@ docs/RUN-STATE.md         the full run log of the 2026-08-07 build session
 docs/archive/             the original plan and prompt-order, superseded, kept for provenance
 .env                      the token. gitignored. never commit it.
 rejected.jsonl            the bounce ledger this machine wrote. gitignored. §5.1
+insults.jsonl             every time the group called the bot stupid. gitignored. §4.12
 .venv/                    gitignored, and it also holds the launcher's dependency stamp
 ```
 

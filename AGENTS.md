@@ -17,6 +17,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
 | what breaks in production and how to diagnose it | `README.md` §5 |
 | the ledger of bounced links and `bot.py --rejected` | `README.md` §5.1 |
+| the insult the bot answers, its two corpora and both thresholds | `README.md` §4.12 ← read before touching `INSULT_WORDS` |
 | the Spanish line each named failure gets, and why three of them hedge | `README.md` §5.2 ← read before touching `FAILURE_SIGNATURES` |
 | carousels, albums, `sendMediaGroup`'s limits | `README.md` §4.10 |
 | message entities, the UTF-16 offset trap, why `text_link` is refused | `README.md` §4.11 |
@@ -51,10 +52,12 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 - **A height cap is not a size guarantee.** Portrait video (720x900, 1440x1800) exceeds a 720 height
   cap while being a small file. The only real size guard is the byte count of the finished file, and
   `filesize_approx` is `NA` on two of the three sites, so anything built on the estimate is dead code.
-- **Exactly two places swallow an exception, and both are load-bearing.** `_apologise()` is the last
-  line of defence: if it re-raises, the group gets nothing at all, which happened in production.
-  `record_rejection()` is diagnostics bolted onto the failure path: a full disk or a read-only
-  checkout may not cost the group its apology. Anywhere else, a swallow is a bug.
+- **Exactly three places swallow an exception, and all three are load-bearing.** `_apologise()` is
+  the last line of defence: if it re-raises, the group gets nothing at all, which happened in
+  production. `record_rejection()` and `record_insult()` are diagnostics bolted onto a path that
+  has to finish anyway: a full disk or a read-only checkout may not cost the group its apology or
+  its answer. Anywhere else, a swallow is a bug — and note what is deliberately *not* protected,
+  the insult reply itself, which is why it runs after the links (see `on_message`).
 - **`connect_timeout` must be passed explicitly.** python-telegram-bot defaults it to 5.0 s and only
   substitutes its own default when the caller passes nothing, so `write_timeout` alone does not
   protect an upload.
@@ -85,6 +88,20 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   taking-over side **never stops**, because that is the only rule that cannot end with nobody
   polling. Two people who both answer yes get an erratic bot and a Spanish line asking one of them
   to close the window — the people are the tie-break, since nothing in the system can be.
+- **The insult matcher is tuned against two corpora, and the second one is the feature.** Both
+  ship as the check (`README.md` §4.12). The three rules that keep it quiet are not
+  interchangeable: both words within one token of each other, **a token may never be longer than
+  the word it matches** (difflib scores `bota`→`bot` at 0.857 and `boton`→`bot` at 0.750), and a
+  threshold per word (`estudio`→`estupido` is 0.800, so 0.85; `vot`→`bot` is 0.667, so 0.66 — one
+  number cannot serve a three-letter word and an eight-letter one). Do not move a threshold without
+  a phrase the group actually sent, and do not add a "smarter" rule: the residual misses
+  (`botestupido`, `robot estupido`) are cheap and the false positives are not.
+- **An insult is not a bounced link and does not go in the ledger.** Its own file, its own reason:
+  `--rejected` opens with "N links bounced", groups by host, and is the one report that decides
+  which site to support next. The two matched words *are* stored, as an argued exception to "no
+  message bodies" — they are near-copies of `bot` and `estupido` by construction, so they carry
+  nothing private, and without them a false positive is indistinguishable from a real insult and no
+  threshold could ever be moved on evidence.
 - **`drop_pending_updates=True` is a decision, not a default.** Telegram holds updates ~24 h and
   every handover follows a gap in which nobody hosted, so replaying the queue dumps the whole gap
   into the group at once. The accepted cost is that a link posted while the bot was off is lost.
@@ -194,7 +211,15 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   · one of the three hedged replies rewritten as a certainty · a `FAILURE_SIGNATURES` marker
   written with a capital (it can then never fire) · a row added that no measured signature reaches
   · the YouTube row keyed back on the bot's own sentence instead of the extractor's
-  · the ledger storing the friendly reply instead of the raw detail.
+  · the ledger storing the friendly reply instead of the raw detail ·
+  the insult never answered, answered but not recorded, recorded but not answered, answered with
+  anything but the owner's exact sentence, or answered *before* the links (`_deliver` cannot raise
+  and an ordinary reply can — the order is the protection) · `on_message` losing either half ·
+  the length rule dropped, so `bota` and `boton` become insults · `INSULT_MAX_GAP` widened to four
+  or closed to zero · either threshold moved in either direction (0.66/0.85 each sit in a measured
+  gap) · the accents, the casefold or the run-collapsing dropped from `insult_tokens` · the insult
+  half reading `text` but not `caption` · the record or the log line carrying the message body ·
+  an insult write failure escaping · insults written into `rejected.jsonl`.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.
@@ -202,11 +227,12 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   clip that only offers h264 would silently empty that check. Entries are
   `(url, expected_kind, expected_files)`; both are asserted, so a reel arriving as a still fails and
   so does a carousel that loses a slide.
-- **Any check that reaches `on_message` or `_deliver` must swap `REJECTED_LEDGER` first.** Both
-  write to it now — the unsupported-host path fires on a plain text message — and a self-check that
-  forgets leaves invented links in the owner's real `rejected.jsonl`, which is the file he reads to
-  decide what to build. Swap the module global and restore it in a `finally`, like every other
-  check here does.
+- **Any check that reaches `on_message` or `_deliver` must swap `REJECTED_LEDGER` *and*
+  `INSULT_LEDGER` first.** Both paths write — the unsupported-host path fires on a plain text
+  message, and the insult path fires on one with no link at all — and a self-check that forgets
+  leaves invented links in the owner's real `rejected.jsonl`, which is the file he reads to decide
+  what to build. Swap the module globals and restore them in a `finally`, like every other check
+  here does.
 - **You cannot test the Telegram layer without a token, and you should not try.** No `.env` exists in
   a fresh worktree. Deterministic checks are yours; the live run belongs to whoever holds the token.
   *"I could not test this live"* is the correct note, not a failure.
@@ -240,6 +266,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   confirm: the taker survives the incumbent's 60 s, the incumbent stops with the new sentence, and
   `getUpdates` afterwards shows **somebody** polling. The two-people-both-say-yes standoff is even
   further from cover — it needs three machines or two runs of the launcher answered yes twice.
+- **Nobody has ever insulted the bot for real.** Every phrase in both corpora was invented by an
+  agent imagining how this group types, so "37 ordinary messages stay quiet" measures the lists,
+  not the group. The first real false positive is worth more than all of them; when one arrives,
+  the two words are in `insults.jsonl` and the fix is a corpus line plus a threshold.
 - **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked —
   including its `--take-over` path, which is the mirror of the macOS one whose branches *were*
   driven. Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to

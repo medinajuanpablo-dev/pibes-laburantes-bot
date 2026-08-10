@@ -6,3 +6,4 @@ cookies.txt
 __pycache__/
 .DS_Store
 rejected.jsonl
+insults.jsonl

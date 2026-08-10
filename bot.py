@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import difflib
 import io
 import json
 import logging
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stdout
 from pathlib import Path
@@ -373,6 +375,52 @@ OVERSIZE_ERROR = "OversizeForTelegram"
 # TikTok eight times this week" is the one signal that decides what to build next,
 # and until now it lived only in a runtime log that dies with the terminal window.
 UNSUPPORTED_ERROR = "UnsupportedHost"
+
+# The one thing the bot answers that is not a link. The owner's words: "cada vez
+# que lea 'bot estupido' en cualquier mensaje (o cualquier variante como 'estupido
+# bot' o 'vot estupido' o letras faltantes) debe registrarlo y responder 'Lo lamento,
+# hago lo que puedo'". His sentence, verbatim, capital and comma included.
+INSULT_REPLY = "Lo lamento, hago lo que puedo"
+
+# The two words, and how close a token has to be to each one. TWO THRESHOLDS BECAUSE
+# THEY ARE DIFFERENT LENGTHS, not because tuning wanted a free hand: at three letters
+# a single substitution already costs 1/3 of the word, so one number cannot both
+# accept "vot" (0.667) and refuse a longer word that shares six letters with
+# "estupido". The pair is what makes this safe -- neither word fires alone.
+#
+# Chosen from two corpora rather than from taste; both ship as the check. The
+# numbers each sit in a measured gap:
+#   * "bot" 0.66 -- true hits bottom out at "vot"/"ot"/"bo" = 0.667, and the closest
+#     ordinary word in the corpus is "no" at 0.400. 0.667 is exactly "one of three
+#     letters is wrong", which is where a typo stops being a typo.
+#   * "estupido" 0.85 -- true hits bottom out at "estupida" 0.875 and "estupdo"
+#     0.933; the closest ordinary word is "estudio" at 0.800. Anything looser starts
+#     answering "estudio".
+# Moving either one needs a phrase the group actually sent, not a hypothetical.
+INSULT_WORDS: tuple[tuple[str, float], ...] = (("bot", 0.66), ("estupido", 0.85))
+
+# How many tokens may sit BETWEEN the two words. One, so "bot re estupido" and "bot
+# es estupido" fire -- "re" is how this group says "very" -- while "el bot funciona,
+# no seas estupido vos" stays quiet at a distance of four. Every token of slack is
+# false-positive surface, and this is the only insult feature in a bot that reads
+# every message a group of friends sends all day.
+# ponytail: the ceiling is a message that says "bot" and, one word later, calls
+# somebody else stupid ("gracias bot, que estupido soy"). Contrived enough to accept,
+# and the cost is one apology nobody asked for. Upgrade path if it ever happens:
+# drop this to 0 and lose "bot re estupido" with it.
+INSULT_MAX_GAP = 1
+
+# Insults get their own file, NOT the rejected-links ledger. They are not bounced
+# links: they have no URL and no error class, `--rejected` opens with "N links
+# bounced" and groups by host, and the owner reads that report to decide which site
+# to support next. Mixing a joke into the one signal that drives the roadmap would
+# cost the report and gain nothing -- and format_rejections is one of the most
+# heavily guarded functions in this file.
+#
+# No reader command for this one. A ledger record needs grouping by class and host to
+# mean anything; an insult record is a date, so `cat insults.jsonl` and `wc -l` are
+# the whole report. Add one when there is something to group.
+INSULT_LEDGER = Path(__file__).resolve().parent / "insults.jsonl"
 
 # `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
 # tests Update.effective_message, which resolves to `edited_message` when that is
@@ -1013,6 +1061,75 @@ def message_urls(message: telegram.Message) -> list[str]:
     return urls
 
 
+def insult_tokens(text: str | None) -> list[str]:
+    """`text` as bare comparable words: unaccented, lower case, no repeats, no noise.
+
+    Four normalisations, each closing one way the same insult is typed in this group:
+
+      * NFD plus dropping the combining marks makes "estúpido" and "estupido" the
+        same word without a table of accented letters.
+      * casefold, so shouting matches.
+      * splitting on anything that is not a-z, so "bot," "¡estúpido!" and an emoji
+        before the word are separators rather than part of it.
+      * collapsing a run of one letter to a single one, so "estupidoooo" and "bott"
+        are the words they are meant to be. This cannot lose anything the match
+        needs: neither word being looked for has a doubled letter.
+    """
+    plain = "".join(
+        char for char in unicodedata.normalize("NFD", text or "")
+        if not unicodedata.combining(char)
+    )
+    return [re.sub(r"(.)\1+", r"\1", token) for token in re.split(r"[^a-z]+", plain.casefold()) if token]
+
+
+def insult_words(text: str | None) -> tuple[str, str] | None:
+    """The two words that insulted the bot, or None. Pure, and the whole feature.
+
+    "bot estupido" in either order, any case, accents optional and tolerant of the
+    typos the owner named -- "vot estupido", missing letters -- without a fuzzy
+    matching library: difflib scores each token against each word and unicodedata
+    handles the accents. Returns the matched tokens as normalised, because they are
+    the only thing worth recording about a hit (see record_insult).
+
+    THE FALSE-POSITIVE SIDE IS THE ONE THAT MATTERS. This reads every message in a
+    group of friends who talk all day, and a bot that apologises when nobody
+    insulted it is worse than one that misses a typo. Three rules do that work, and
+    every one of them was earned by a phrase in the corpus:
+
+      * BOTH WORDS, NEAR EACH OTHER. Neither fires alone -- "sos un estupido" is
+        about a person and "gracias bot" is not an insult -- and they have to be
+        within INSULT_MAX_GAP tokens of each other. This is the rule that carries
+        almost everything: "estupido" next to something bot-shaped is essentially
+        never anything but this.
+      * A TOKEN MAY NOT BE LONGER THAN THE WORD IT MATCHES. A typo drops or changes
+        a letter; a longer word is a different word. Without this, "bot" matches
+        "bota" at 0.857 and "boton" at 0.750, and the bot apologises to a message
+        about a boot or a button. It also refuses "robot", which is a real miss and
+        the price of refusing "boton" -- difflib scores the two identically.
+      * A THRESHOLD PER WORD, both sitting in a measured gap. See INSULT_WORDS.
+
+    Known misses, all deliberate and all cheap: "botestupido" written without the
+    space (nothing here joins tokens, and the owner did not ask for it), "robot
+    estupido" (above), and anything further apart than the gap, like "el bot es un
+    estupido". A missed joke costs nothing; a wrong apology costs the group's trust
+    in every other thing the bot says.
+    """
+    tokens = insult_tokens(text)
+    found: dict[str, list[tuple[int, str]]] = {}
+    for index, token in enumerate(tokens):
+        for word, threshold in INSULT_WORDS:
+            if len(token) > len(word):
+                continue
+            if difflib.SequenceMatcher(None, token, word).ratio() >= threshold:
+                found.setdefault(word, []).append((index, token))
+    first, second = INSULT_WORDS[0][0], INSULT_WORDS[1][0]
+    for left_at, left in found.get(first, ()):
+        for right_at, right in found.get(second, ()):
+            if abs(left_at - right_at) <= INSULT_MAX_GAP + 1:
+                return left, right
+    return None
+
+
 def _host_is_one_of(url: str, hosts: frozenset[str]) -> bool:
     """Whether `url`'s host is one of `hosts`, or a subdomain of one.
 
@@ -1345,6 +1462,38 @@ def record_rejection(
         log.exception("could not write the rejected-links ledger; delivery is unaffected")
 
 
+def record_insult(
+    message: telegram.Message, words: tuple[str, str], path: Path | None = None
+) -> None:
+    """Append one insult to its own file. Like record_rejection, this may not raise.
+
+    Same reason as the ledger's: this is diagnostics bolted onto a reply, and a full
+    disk may not cost the group the answer it is about to get. Same shape too --
+    when, chat, message -- so one pair of eyes reads both files the same way.
+
+    WHAT IS STORED OF THE MESSAGE IS THE TWO MATCHED WORDS AND NOTHING ELSE. The
+    privacy rule that keeps message bodies out of the ledger holds here, and two
+    words are not the body: by construction they are near-copies of "bot" and
+    "estupido" -- that is the only way they got matched -- so they cannot carry
+    anything private. They are worth the two words of exposure because they are the
+    only thing that can tell the owner a hit was WRONG. A record of dates alone
+    cannot be audited: a false positive and a real insult look identical in it, and
+    the thresholds could never be moved on evidence. Their ratios are not stored
+    because they are recomputable from the words.
+    """
+    try:
+        record = {
+            "when": dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "chat_id": getattr(message, "chat_id", None),
+            "message_id": getattr(message, "message_id", None),
+            "words": list(words),
+        }
+        with (path or INSULT_LEDGER).open("a", encoding="utf-8") as ledger:
+            ledger.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        log.exception("could not write the insult log; the reply is unaffected")
+
+
 def read_rejections(path: Path) -> list[dict]:
     """Every readable record in the ledger, oldest first.
 
@@ -1440,6 +1589,49 @@ async def on_start(update: telegram.Update, _context: object) -> None:
 
 
 async def on_message(update: telegram.Update, _context: object) -> None:
+    """Everything the bot does with a message. Two reasons to react, in this order.
+
+    Links first, and the insult after, on purpose. `_deliver` cannot raise -- it
+    catches its own failures and apologises -- while the insult reply is an ordinary
+    reply_text that can time out like any other, and that used to be enough to lose
+    a whole update (README.md §4.6). Answering the links first means the worst a
+    failed insult reply can cost is the joke: the videos are already sent and the
+    ledger is already written. The other order would let a network hiccup swallow
+    the download that somebody actually asked for.
+
+    Neither half knows about the other. A message can be both, and then both happen.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    await _handle_links(message)
+    await _handle_insult(message)
+
+
+async def _handle_insult(message: telegram.Message) -> None:
+    """Answer a message that called the bot stupid, and write it down.
+
+    The record goes first, for the same reason the ledger is written before the
+    apology: it cannot raise, so it cannot cost the reply, and a network bad enough
+    to kill the reply still leaves the evidence behind.
+
+    Not protected by a try/except of its own, and that is deliberate -- this file
+    swallows exceptions in exactly three places and each one is load-bearing (see
+    AGENTS.md). If the reply fails, the exception reaches on_error, which logs it;
+    the links are already delivered by then, so nothing that matters is lost, and a
+    fourth silent swallow would cost more than the joke it protects.
+    """
+    words = insult_words(getattr(message, "text", None) or getattr(message, "caption", None))
+    if words is None:
+        return
+    # The two matched words, never the message. Same rule as the ledger and the
+    # ignore-logging: enough to tell a real insult from a false alarm, and no more.
+    log.info("message %s: the bot was called %s; apologising", message.message_id, " ".join(words))
+    record_insult(message, words)
+    await _reply_text(message, INSULT_REPLY)
+
+
+async def _handle_links(message: telegram.Message) -> None:
     """Deliver every supported link in a message, and say why when there are none.
 
     Doing nothing is a legitimate outcome here -- most messages in the group are not
@@ -1459,10 +1651,12 @@ async def on_message(update: telegram.Update, _context: object) -> None:
     answers "what has this group been pasting that I do not support", which is a
     question nobody can ask a terminal that has been closed. Same privacy rule in
     both places: the URLs, never the body.
+
+    "Nothing to do" below is about links and stays literally true of them: a message
+    that only insults the bot logs this line and is then answered by _handle_insult,
+    which says so on its own line. The wording is not softened because it is what
+    README.md §5 tells whoever is diagnosing a link that produced no video.
     """
-    message = update.effective_message
-    if message is None:
-        return
     urls = message_urls(message)
     if not urls:
         log.info("message %s: no URL recognised, nothing to do", message.message_id)
@@ -3097,6 +3291,246 @@ def _check_unattempted_links_are_recorded() -> None:
     print("ok  a link the bot declined to try is recorded, separately from a bounce")
 
 
+# Everything the bot must answer, and everything it must stay quiet through. THE
+# SECOND LIST IS THE FEATURE. This runs on every message a group of friends sends
+# all day, and a bot that apologises when nobody insulted it is worse than one that
+# misses a typo -- so the near-misses are not decoration: each of these killed a
+# candidate rule while the matcher was being tuned.
+#
+#   "esa bota estupida" / "el boton estupido"  -> killed a plain ratio on "bot",
+#       which scores 0.857 on "bota" and 0.750 on "boton"; hence the length rule.
+#   "abri el bot, estudio despues"             -> killed a 0.80 threshold on
+#       "estupido", which is exactly what "estudio" scores against it.
+#   "el bot funciona, no seas estupido vos"    -> killed matching the two words
+#       anywhere in the message; hence INSULT_MAX_GAP.
+#   "sos un estupido" / "gracias bot"          -> killed either word on its own.
+INSULTS_THAT_MUST_FIRE = (
+    "bot estupido",
+    "bot estúpido",
+    "estupido bot",
+    "estúpido bot",
+    "BOT ESTUPIDO",
+    "Bot, estúpido!",
+    "vot estupido",            # the owner named this one
+    "estupido vot",
+    "bot estupdo",             # and these: letras faltantes
+    "bot estpido",
+    "bot etupido",
+    "bo estupido",
+    "bot estupidoooo",         # chat elongation
+    "boooot estupido",
+    "BOT ESTUPIDOOO!!!",
+    "sos un bot estupido",
+    "che bot estupido, bajame el video",
+    "bot re estupido",         # one word between, which is how this group talks
+    "bot es estupido",
+    "que bot mas estupido",
+    "estupido el bot",
+    "bot estupida",
+    "anda a cagar bot estupido",
+    "\U0001f916 bot estupido",
+    "bot estupido https://youtu.be/abc",
+)
+
+ORDINARY_CHAT_THAT_MUST_NOT_FIRE = (
+    "che alguien vio el partido ayer",
+    "jajaja que grande",
+    "sos un estupido",                              # a person, not the bot
+    "que estupido que sos",
+    "no seas estupido",
+    "vos sos estupido",
+    "estupido",                                     # the word alone
+    "estúpido",
+    "bot",                                          # and the other word alone
+    "el bot anda joya",
+    "gracias bot",
+    "el bot no anda",
+    "dale bot, mandame el video",
+    "buenisimo el bot, gracias",
+    "mandame el link del bot que te pase",
+    "que estupidez",
+    "una estupidez de partido",
+    "no entiendo nada, esto es una estupidez total",
+    "esa bota estupida",                            # 0.857 against "bot"
+    "el boton estupido de la app",                  # 0.750 against "bot"
+    "la bota nueva",
+    "mira esta foto estupida",
+    "que voto estupido",
+    "esa moto estupida",
+    "el robot de la fabrica",
+    "abri el bot, estudio despues",                 # 0.800 against "estupido"
+    "me voy a estudiar",
+    "mira que boludo estupido",                     # insulting a friend, not the bot
+    "ese tipo es un estupido barbaro",
+    "que estupido este partido",
+    "que estupido, o no",                           # "o" is 0.500 against "bot"
+    "estupido el arbitro",
+    "no puedo creer lo estupido que soy",
+    "un dia estupido, no puedo mas",
+    "estupida app",
+    "el bot funciona, no seas estupido vos",        # both words, four apart
+    "https://www.instagram.com/p/DbvWPFQxPkI/",
+)
+
+
+def _check_insult_detection() -> None:
+    """The bot answers being called stupid, records it, and stays quiet otherwise.
+
+    The two corpora above are the check; everything below them is the wiring -- the
+    exact sentence, the record, the privacy rule, and the one interaction that
+    matters: a message carrying both an insult and a link still delivers the link.
+
+    No network and no token. `_deliver` and both files are swapped out, because a
+    self-check that forgets leaves invented records in the owner's real files.
+    """
+    for text in INSULTS_THAT_MUST_FIRE:
+        assert insult_words(text) is not None, f"must be read as an insult: {text!r}"
+    for text in ORDINARY_CHAT_THAT_MUST_NOT_FIRE:
+        assert insult_words(text) is None, (
+            f"ordinary chat must not be answered: {text!r} matched {insult_words(text)}"
+        )
+    assert insult_words("") is None and insult_words(None) is None
+    assert insult_words("\U0001f602\U0001f602\U0001f602") is None, "emoji are not words"
+    # The matched words are what gets recorded, so their shape is part of the contract.
+    assert insult_words("che VOT estúpido") == ("vot", "estupido"), insult_words("che VOT estúpido")
+
+    # The owner asked for this sentence, exactly. Capital and comma included.
+    assert INSULT_REPLY == "Lo lamento, hago lo que puedo", INSULT_REPLY
+
+    class RecordingMessage:
+        chat_id = -100123
+        message_id = 42
+
+        def __init__(self, text: str | None = None, caption: str | None = None) -> None:
+            self.text = text
+            self.caption = caption
+            self.said: list[str] = []
+
+        async def reply_text(self, text: str, **_kwargs: object) -> None:
+            self.said.append(text)
+
+    async def _both_halves(message: RecordingMessage) -> None:
+        # A RecordingMessage is not a telegram.Message, so the two halves are called
+        # the way on_message calls them; that the DISPATCHER still calls both, in
+        # this order, is asserted separately at the end on a real Update.
+        await _handle_links(message)
+        await _handle_insult(message)
+
+    def _run(message: RecordingMessage) -> tuple[list[dict], list[dict], list[str], str]:
+        """on_message's two halves with _deliver and BOTH files swapped out."""
+        events: list[str] = []
+
+        async def _fake_deliver(_message: object, url: str) -> None:
+            events.append(f"deliver {url}")
+
+        real_deliver = globals()["_deliver"]
+        real_rejected, real_insults = globals()["REJECTED_LEDGER"], globals()["INSULT_LEDGER"]
+        globals()["_deliver"] = _fake_deliver
+        with temp_workspace() as workspace:
+            insult_file = workspace / "insults.jsonl"
+            globals()["REJECTED_LEDGER"] = workspace / "rejected.jsonl"
+            globals()["INSULT_LEDGER"] = insult_file
+            try:
+                with _capture_log(logging.INFO) as lines:
+                    asyncio.run(_both_halves(message))
+                events.extend(f"said {said}" for said in message.said)
+                # read_rejections is a JSON-lines reader that happens to be named for
+                # its first caller; the two files have the same one-object-per-line
+                # shape on purpose.
+                insults = read_rejections(insult_file)
+                rejected = read_rejections(globals()["REJECTED_LEDGER"])
+                raw = insult_file.read_text(encoding="utf-8") if insult_file.is_file() else ""
+                return insults, rejected, events, raw + "\n".join(lines)
+            finally:
+                globals()["_deliver"] = real_deliver
+                globals()["REJECTED_LEDGER"] = real_rejected
+                globals()["INSULT_LEDGER"] = real_insults
+
+    # An insult on its own: the sentence, once, and one record.
+    insulted = RecordingMessage(text="SECRETO-DEL-GRUPO bot estupido, no bajas nada")
+    insults, rejected, _events, trace = _run(insulted)
+    assert insulted.said == [INSULT_REPLY], insulted.said
+    assert len(insults) == 1, insults
+    assert insults[0]["words"] == ["bot", "estupido"], insults
+    assert insults[0]["chat_id"] == -100123 and insults[0]["message_id"] == 42, insults
+    assert insults[0]["when"], insults
+    assert rejected == [], "an insult is not a bounced link and never touches that file"
+    # Neither the file nor the log may carry the message. The two matched words are
+    # not the body: they are near-copies of "bot" and "estupido" by construction.
+    assert "SECRETO-DEL-GRUPO" not in trace and "no bajas nada" not in trace, trace
+    # And the link half still says its line: "nothing to do" is about links, and a
+    # message that is only an insult really does have none.
+    assert "no URL recognised" in trace and "the bot was called" in trace, trace
+
+    # Ordinary chat: nothing said, nothing written, both files untouched.
+    quiet = RecordingMessage(text="che alguien vio el partido ayer")
+    insults, rejected, _events, _trace = _run(quiet)
+    assert quiet.said == [] and insults == [] and rejected == [], (quiet.said, insults, rejected)
+
+    # THE INTERACTION THAT MATTERS: both in one message. The link is delivered, the
+    # insult is answered, and the link goes FIRST -- _deliver cannot raise, an
+    # ordinary reply can, and the download is the part somebody actually asked for.
+    both = RecordingMessage(text="bot estupido, bajame https://youtu.be/abc")
+    insults, rejected, events, _trace = _run(both)
+    assert events == ["deliver https://youtu.be/abc", f"said {INSULT_REPLY}"], events
+    assert len(insults) == 1 and rejected == [], (insults, rejected)
+
+    # An unsupported link plus an insult: the ledger keeps recording the skip, and
+    # the two files stay in their own lanes.
+    mixed = RecordingMessage(text="bot estupido https://www.tiktok.com/@a/video/1")
+    insults, rejected, _events, _trace = _run(mixed)
+    assert len(insults) == 1 and len(rejected) == 1, (insults, rejected)
+    assert rejected[0]["error"] == UNSUPPORTED_ERROR and "words" not in rejected[0], rejected
+
+    # A caption is the other half of MESSAGE_FILTER: a photo captioned "bot estupido"
+    # is the same message.
+    captioned = RecordingMessage(caption="bot estupido")
+    insults, _rejected, _events, _trace = _run(captioned)
+    assert captioned.said == [INSULT_REPLY] and len(insults) == 1, (captioned.said, insults)
+
+    # A link with no insult writes nothing to the insult file.
+    linked = RecordingMessage(text="miren https://youtu.be/abc")
+    insults, _rejected, events, _trace = _run(linked)
+    assert insults == [] and events == ["deliver https://youtu.be/abc"], (insults, events)
+
+    # record_insult may never raise: it is diagnostics bolted onto a reply, exactly
+    # like the ledger, and a full disk may not cost the group its answer.
+    with temp_workspace() as workspace:
+        unwritable = workspace / "a-directory"
+        unwritable.mkdir()
+        with _capture_log(logging.ERROR) as complaints:
+            record_insult(RecordingMessage(text="bot estupido"), ("bot", "estupido"), unwritable)
+        assert complaints, "a failed insult write must be swallowed AND logged"
+
+    # Finally the dispatcher itself: both halves reached, links first, and a message
+    # that is not there at all is still nothing to do.
+    real = telegram.Message(
+        message_id=9,
+        date=dt.datetime.fromtimestamp(0, dt.timezone.utc),
+        chat=telegram.Chat(id=-100, type=telegram.Chat.GROUP),
+        from_user=telegram.User(id=1, first_name="u", is_bot=False),
+        text="bot estupido https://www.tiktok.com/@a/video/1",
+    )
+    reached: list[str] = []
+
+    async def _note_links(_message: object) -> None:
+        reached.append("links")
+
+    async def _note_insult(_message: object) -> None:
+        reached.append("insult")
+
+    real_links, real_insult = globals()["_handle_links"], globals()["_handle_insult"]
+    globals()["_handle_links"], globals()["_handle_insult"] = _note_links, _note_insult
+    try:
+        asyncio.run(on_message(telegram.Update(update_id=1, message=real), None))
+        asyncio.run(on_message(telegram.Update(update_id=2), None))
+    finally:
+        globals()["_handle_links"], globals()["_handle_insult"] = real_links, real_insult
+    assert reached == ["links", "insult"], reached
+    print(f"ok  the bot answers {len(INSULTS_THAT_MUST_FIRE)} insults and stays quiet through "
+          f"{len(ORDINARY_CHAT_THAT_MUST_NOT_FIRE)} ordinary messages")
+
+
 def _check_failure_path() -> None:
     """_deliver must survive a download AND a reply that both blow up.
 
@@ -3443,6 +3877,7 @@ def _self_check() -> None:
     _check_failed_extraction_keeps_its_error()
     _check_only_instagram_can_be_an_image_post()
     _check_unattempted_links_are_recorded()
+    _check_insult_detection()
     _check_album_delivery()
     _check_failure_path()
     _check_take_over_intent()
