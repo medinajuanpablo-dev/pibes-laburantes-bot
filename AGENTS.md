@@ -11,7 +11,8 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 |---|---|
 | what it does, how to run it, the architecture | `README.md` §1–§2 |
 | the launchers, the baton pass, one-poller-per-token | `README.md` §2.1 and §4.9 |
-| `/instalar`, its line budget, why it is a message and not a file, the one parse mode in this file | `README.md` §2.2 ← read before touching `install_reply` |
+| `/instalar`, its line budget, why it is a message and not an attachment, the one parse mode in this file | `README.md` §2.2 ← read before touching `install_reply` |
+| the Windows download, the bootstrap, and **which copy updates how** | `README.md` §2.2 + `docs/updating.md` ← read before touching `instalar-bot.cmd` or either update path |
 | how the owner ships a change, bumps a pin, sets up a new host | `docs/updating.md` |
 | what a friend hosting the bot is told (Spanish, product copy) | `EMPEZAR-ACA.md` |
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
@@ -31,8 +32,10 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 1. **One file until it hurts.** No `src/`, no packages, no class hierarchy, no plugin registry, no
    dependency injection. A second file needs its reason in the commit message.
 2. **Nothing OS-specific in `bot.py`.** It gets copied onto an old Linux box. No `/opt/homebrew`
-   paths, no `launchd`, no Homebrew assumptions. Resolve ffmpeg from `PATH`. The two launchers are
-   the only OS-specific files here, that is what they are for, and none of it may leak inwards.
+   paths, no `launchd`, no Homebrew assumptions. Resolve ffmpeg from `PATH`. The two launchers and
+   the Windows bootstrap are the only OS-specific files here, that is what they are for, and none of
+   it may leak inwards. **Describing a platform is text, not behaviour**: `/instalar` naming a
+   platform's obstacle is copy, and it still reads nothing about the machine it runs on.
 3. **No database, no job queue, no web framework, no Docker, no process manager.** At this volume
    they are cost with no benefit. `systemd` belongs to the port, not here.
 4. **Secrets never enter git.** The token is `TELEGRAM_BOT_TOKEN` from the environment, kept in a
@@ -114,19 +117,36 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   Desktop actually writes — mode `644`, quarantined — so an attachment fails both tests at once
   (`README.md` §2.2 has the table). `git clone` supplies both, because git stores the mode
   (`run-bot.command` is `100755` in the index) and writes no quarantine. That is the entire reason
-  distribution is a clone rather than a zip, it is why the launcher can update itself, and it is why
-  `/instalar` hands out a **command** and never a file as an attachment. **Right-click → Open does
-  not rescue an attachment**: it speaks to the quarantine half and cannot add an exec bit, and the
-  `chmod +x` that would costs the friend exactly the Terminal that sending a file was meant to save.
-  A launcher on its own is also inert — its first act is `git pull` in a directory with no `.git` —
-  but that objection alone would not settle it, because a bootstrap that clones and hands off is
-  still a file you double-click. The two measurements are what settle it.
+  distribution is a clone rather than a zip **on macOS**, it is why the launcher can update itself,
+  and it is why `/instalar mac` hands out a **command** and never a file as an attachment.
+  **Right-click → Open does not rescue an attachment**: it speaks to the quarantine half and cannot
+  add an exec bit, and the `chmod +x` that would costs the friend exactly the Terminal that sending a
+  file was meant to save. A launcher on its own is also inert — its first act is `git pull` in a
+  directory with no `.git` — but that objection alone would not settle it, because a bootstrap that
+  clones and hands off is still a file you double-click. The two measurements are what settle it.
+- **On Windows exactly one of those two facts is false, and that single difference is a whole
+  feature.** A `.cmd` needs no exec bit, so a downloaded one runs, and the mark-of-the-web dialog is
+  a confirmation rather than a refusal. So `/instalar windows` hands out a **link** to
+  `instalar-bot.cmd`, which fetches the repository as a source tarball, unpacks it and hands off to
+  `run-bot.cmd`. The inert-launcher objection is exactly why the link is **not** `run-bot.cmd`:
+  linking the launcher would move the git step rather than remove it. **Do not build a macOS twin of
+  the bootstrap** — there the download cannot run at all — and do not weaken anything on the macOS
+  path to make the two symmetric. Two things bind anyone touching either path. A tarball copy has no
+  `.git` and updates by re-fetching, so the bootstrap **refuses to unpack over a `.git`**: otherwise
+  it leaves a clone's tree dirty, `git pull --ff-only` then refuses it, and the download has
+  destroyed the update channel of the one copy that had a working one. And **`git push` is still the
+  entire release process for both kinds of copy**, because codeload serves the tip of `main`.
+  Everything about the *execution* of the two Windows files is **untested** — no Windows exists in
+  this project; `docs/updating.md` separates what was measured here from what was only read.
 - **The install reply has a line budget and it is asserted exactly** — three lines per platform,
   five for both. It is a product decision, not formatting: a friend taps and skims, and at 22 lines
   the line that mattered was the one skipped. A line earns its place only by stopping somebody in
-  the next minute, which is why the reply names **git and the token and nothing else**, and why the
+  the next minute, which is why each platform gets **its own obstacle and the token, and nothing
+  else** — git on macOS, and on Windows the confirmation the machine asks for plus the browser
+  showing the file instead of saving it, because that platform installs nothing now. The
   one-host-at-a-time rule and the double-click-from-now-on payoff live in `EMPEZAR-ACA.md`, which
-  arrives with the clone. Adding a line here means taking one out. `README.md` §2.2.
+  arrives with the code either way. Adding a line here means taking one out, and **the budget did not
+  move when Windows changed mechanism**: two lines per platform before and after. `README.md` §2.2.
 - **Exactly one reply in this file sets a `parse_mode`, and `_reply_text`'s default must stay
   `None`.** `/instalar` needs HTML for its code block, which is what makes Telegram offer
   tap-to-copy. Every other reply — the apology, the oversize line with a raw URL in it, the insult
@@ -281,11 +301,17 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   builder, or **reversed** (that last one is invisible to the name and shape asserts and is what the
   invariance assert is for) · a fake token that is not token-shaped, or the two fakes made equal ·
   `CLONE_URL` pointed at another repository or written as the ssh remote · `CLONE_DIR` keeping its
-  `.git` suffix · either warning dropped — the owner-hands-out-the-token line, the macOS Command
-  Line Tools dialog, or the Git-for-Windows link. Note that a bare `"git" in text` assert is
-  **vacuous**: the pasted command contains `git clone`. · **a line added to the reply, or one
-  removed** — the budget is three lines per platform and five bare, and it is asserted exactly,
-  because the defect it replaced was a 22-line wall nobody read to the end of.
+  `.git` suffix · `BOOTSTRAP_URL` hand-written instead of derived, pointed at another repository, or
+  losing its `main` or its filename · either warning dropped — the owner-hands-out-the-token line,
+  the macOS Command Line Tools dialog, or Windows' *Ejecutar de todas formas*. Note that a bare
+  `"git" in text` assert is **vacuous** twice over: the pasted command contains `git clone`, and the
+  Windows reply's link contains `raw.githubusercontent.com`. · the Windows reply losing its download
+  link, putting it inside a `<pre>` (a URL in a code block is not tappable), naming `run-bot.cmd`
+  instead of the bootstrap (that copy would run and never update again), or going back to demanding
+  git · `instalar-bot.cmd` fetching a different repository than `CLONE_URL`, or dropping the
+  `--exclude` that keeps it out of its own unpack · **a line added to the reply, or one removed** —
+  the budget is three lines per platform and five bare, and it is asserted exactly, because the defect
+  it replaced was a 22-line wall nobody read to the end of.
 - **The self-check really downloads six times** — YouTube, an Instagram reel, an Instagram image
   post, Facebook, an Instagram image carousel and an Instagram video carousel. That is deliberate:
   extraction rotting is this project's actual failure mode and only a real download detects it.
@@ -338,14 +364,18 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   fired and was caught by a review pass, not by the corpus that had just gone green. The first
   real false positive is worth more than all of them; when one arrives, the two words are in
   `insults.jsonl` and the fix is a corpus line plus a `NOT_THE_BOT` entry.
-- **`run-bot.cmd` has never run on Windows.** It was written on a Mac and only statically checked —
-  including its `--take-over` path, which is the mirror of the macOS one whose branches *were*
-  driven. Say "untested" in those words until somebody watches it; `docs/updating.md` lists what to
-  watch. The line `/instalar windows` hands out ends in `./run-bot.cmd` **from Git Bash**, which is
-  a second untested thing on top of the first: Windows' `CreateProcess` runs a `.cmd` through
-  `cmd.exe`, which is why `./gradlew.bat` works there, but nobody has watched it here. Its failure
-  is recoverable — the clone has already happened by then and the reply also says the file is a
-  double-click from now on.
+- **Neither Windows file has ever run on Windows.** `run-bot.cmd` and `instalar-bot.cmd` were both
+  written on a Mac and only statically checked — ASCII, CRLF, every `goto` has a label, no bare `&`
+  in an `if` — including the launcher's `--take-over` path, which is the mirror of the macOS one
+  whose branches *were* driven. Say "untested" in that word until somebody watches them;
+  `docs/updating.md` lists what to watch and, for the bootstrap, separates the parts that **were**
+  measured here (the tarball URL, what the archive contains, that the unpack cannot touch `.env` or
+  `.venv`, that a truncated download is caught first) from the part that cannot be: whether cmd.exe
+  runs any of it. The likeliest place a friend gets stuck is not the script at all —
+  raw.githubusercontent.com serves a `.cmd` as `text/plain` with no `content-disposition` (measured),
+  so the browser is expected to display it and the friend has to save it, which is why the reply
+  spends words on Ctrl+S. `/instalar windows` no longer hands out a Git Bash command line at all, so
+  the old "does `./run-bot.cmd` work from Git Bash" question is gone with it.
 - **Nobody has seen the install reply rendered by a Telegram client.** The HTML is asserted offline
   — allowed tags only, no bare `&`, under the length ceiling — but no message has been sent, so
   "the `<pre>` block offers tap-to-copy" is read from Telegram's documentation and not measured.

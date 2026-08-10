@@ -509,23 +509,54 @@ PLATFORM_WORDS = {
     **dict.fromkeys(("windows", "win", "pc", "microsoft"), "windows"),
 }
 
-GIT_FOR_WINDOWS_URL = "https://git-scm.com/download/win"
+# The Windows bootstrap: the file a friend downloads instead of installing git. It
+# fetches the repository as a tarball, unpacks it and hands off to run-bot.cmd. It
+# exists on Windows only, and the asymmetry is the reason: a .cmd needs no exec bit,
+# so a downloaded one runs, while a downloaded .command needs the exec bit *and* no
+# quarantine and arrives with neither (README.md 2.2, measured). There is no macOS
+# twin of this file and there must not be.
+BOOTSTRAP_FILE = "instalar-bot.cmd"
 
-# Where each platform's friend pastes the command, carrying the one obstacle that is
-# genuinely platform-specific: on macOS git hides behind Apple's Command Line Tools
-# dialog, on Windows it is absent and has to be installed first. Plain text, because
-# install_reply escapes it, and it continues the bolded platform name, hence lowercase.
+# Derived from CLONE_URL rather than written out, for the same reason CLONE_DIR is: a
+# second hand-written copy of the repository's name is a second thing that can send
+# friends somewhere else. `main` is the branch every friend tracks -- both update
+# mechanisms follow it, `git pull` in a clone and the bootstrap's re-fetch alike.
+BOOTSTRAP_URL = (
+    CLONE_URL.replace("https://github.com/", "https://raw.githubusercontent.com/", 1).removesuffix(".git")
+    + f"/main/{BOOTSTRAP_FILE}"
+)
+
+# Where each platform's friend starts, carrying the one obstacle that is genuinely
+# platform-specific -- and the two obstacles are no longer the same kind of thing.
+# macOS pastes a command, so its obstacle is git behind Apple's Command Line Tools
+# dialog. Windows downloads a file and needs no git at all, so its obstacle moves to
+# the browser: raw.githubusercontent.com serves a .cmd as `text/plain` with no
+# content-disposition (measured 2026-08-10), so Chrome and Edge are expected to show
+# the file instead of saving it. Plain text, because install_reply escapes it, and it
+# continues the bolded platform name, hence lowercase.
 PLATFORM_INTRO = {
     "mac": (
         "abrí Terminal (Cmd+Espacio, escribí Terminal, Enter) y pegá esto. Si te salta "
         "una ventana pidiendo instalar las herramientas de línea de comandos, aceptá y "
         "pegalo de nuevo."
     ),
+    # The URL goes last on purpose: Telegram ends an auto-detected link at the next
+    # space, so nothing after it can end up inside the tappable part.
     "windows": (
-        f"instalá git de {GIT_FOR_WINDOWS_URL}, abrí Git Bash y pegá esto. Si dice que "
-        f"no encuentra git, es que todavía falta ese paso."
+        f"bajá este archivo y hacé doble clic, no hace falta instalar git ni nada "
+        f"más: {BOOTSTRAP_URL}"
     ),
 }
+
+# Windows' second line, in the place macOS spends on its pasteable block. Both halves
+# earn it the way every other line here does, by stopping somebody in the next minute:
+# the file is expected to open as text rather than download, and Windows asks before
+# running anything that arrived from the internet. Naming the words on the buttons is
+# what turns a dialog that reads like a virus warning into a step.
+WINDOWS_CONFIRMATION = (
+    "Si se abre como texto en el navegador, guardalo con Ctrl+S. Después Windows te va "
+    "a preguntar si estás seguro: Más información → Ejecutar de todas formas."
+)
 
 # `filters.TEXT | filters.CAPTION` on its own is not "new messages": MessageFilter
 # tests Update.effective_message, which resolves to `edited_message` when that is
@@ -1438,14 +1469,36 @@ def install_command_line(platform: str) -> str:
     )
 
 
+def install_block(platform: str) -> list[str]:
+    """The two lines one platform gets, in Spanish, as Telegram HTML.
+
+    Two lines each, which is what keeps the budget where it was, but they no longer
+    say the same *kind* of thing and that is this feature rather than an accident:
+    macOS is handed a command to paste because a downloaded launcher cannot run there
+    at all, and Windows is handed a file to download because a .cmd needs no exec bit.
+    README.md 2.2 has both measurements.
+
+    Which means the second line differs too. On macOS it is the pasteable block, and
+    it has to be a <pre> or Telegram offers nothing to copy. On Windows it is prose:
+    a URL inside a code block would not be tappable, and what Windows needs said is
+    what the machine will ask before it runs the file.
+    """
+    intro = f"<b>En {html.escape(PLATFORM_NAMES[platform])}</b> — {html.escape(PLATFORM_INTRO[platform])}"
+    if platform == "windows":
+        return [intro, html.escape(WINDOWS_CONFIRMATION)]
+    return [intro, f"<pre>{html.escape(install_command_line(platform))}</pre>"]
+
+
 def install_reply(platform: str | None = None) -> str:
     """The install instructions the bot hands out, in Spanish, as Telegram HTML.
 
     Three lines for one platform, five for both, and that ceiling is the feature: the
     audience taps and skims, so a wall buries the one line that matters. A line has to
-    earn its place by stopping a friend in the next minute -- git, and the token.
-    Everything else a host needs is in EMPEZAR-ACA.md, which the clone brings with it,
-    and the launcher asks about the hand-over itself, when it matters. README.md 2.2.
+    earn its place by stopping a friend in the next minute -- on macOS git, on Windows
+    what the machine asks before it runs a downloaded file, and on both the token.
+    Everything else a host needs is in EMPEZAR-ACA.md, which arrives with the code
+    either way, and the launcher asks about the hand-over itself, when it matters.
+    README.md 2.2.
 
     `platform` None means both blocks, and that is the common case rather than the
     fallback: a tap on Telegram's command menu sends the bare command.
@@ -1459,8 +1512,7 @@ def install_reply(platform: str | None = None) -> str:
     """
     lines = []
     for each in (platform,) if platform else ("mac", "windows"):
-        lines.append(f"<b>En {html.escape(PLATFORM_NAMES[each])}</b> — {html.escape(PLATFORM_INTRO[each])}")
-        lines.append(f"<pre>{html.escape(install_command_line(each))}</pre>")
+        lines.extend(install_block(each))
     # The one obstacle no friend can clear alone, and the rule as much as the copy:
     # the bot says who hands out the token, and it is never the bot.
     lines.append(
@@ -4242,10 +4294,31 @@ def _check_install_instructions() -> None:
     assert not CLONE_DIR.endswith(".git"), CLONE_DIR
     assert CLONE_URL.endswith(f"/{CLONE_DIR}.git"), (CLONE_URL, CLONE_DIR)
 
-    # The first obstacle, per platform. A bare `"git" in text` would be satisfied by
-    # the `git clone` inside the command, so each platform is pinned on the words that
-    # are actually its own warning: Apple's dialog, and the installer Windows needs.
-    git_warning = {"mac": "herramientas de línea de comandos", "windows": GIT_FOR_WINDOWS_URL}
+    # The bootstrap's link is derived too, and from the same string, so the same rule
+    # applies: pin the derivation instead of letting the reply agree with itself.
+    assert BOOTSTRAP_URL.startswith("https://raw.githubusercontent.com/"), BOOTSTRAP_URL
+    assert BOOTSTRAP_URL.endswith(f"/main/{BOOTSTRAP_FILE}"), BOOTSTRAP_URL
+    assert f"/{CLONE_DIR}/" in BOOTSTRAP_URL, (
+        f"the download link points somewhere other than {CLONE_DIR}: {BOOTSTRAP_URL}"
+    )
+    assert ".git/" not in BOOTSTRAP_URL, BOOTSTRAP_URL
+
+    # The first obstacle, per platform, and they are no longer the same kind of thing.
+    # macOS has to get past git -- a bare `"git" in text` would be satisfied by the
+    # `git clone` inside its own command, so it is pinned on Apple's dialog instead.
+    # Windows installs nothing now, so its obstacle is the machine asking whether to
+    # run a file that came from the internet, and the reply is pinned on the words on
+    # the buttons.
+    obstacle = {
+        "mac": "herramientas de línea de comandos",
+        "windows": "Ejecutar de todas formas",
+    }
+    # What each platform is handed, and what it must never be handed instead. macOS
+    # gets a command whose last act opens run-bot.command. Windows gets the bootstrap:
+    # run-bot.cmd does run in a downloaded copy, it just never updates it, so naming
+    # that file here would quietly freeze that friend at the version they first
+    # downloaded -- which is the whole reason this order exists.
+    handed = {"mac": f"./{LAUNCHER_FILE['mac']}", "windows": BOOTSTRAP_FILE}
 
     for label, text, lines, covers in (
         ("mac", mac, 3, ("mac",)),
@@ -4253,26 +4326,44 @@ def _check_install_instructions() -> None:
         ("both", both, 5, ("mac", "windows")),
     ):
         # The budget, and it is the feature rather than a style note: the 22-line wall
-        # this replaced was skimmed, and the token line was what got skimmed past.
+        # this replaced was skimmed, and the token line was what got skimmed past. It
+        # did not move when Windows changed mechanism -- two lines per platform, still.
         assert len(text.splitlines()) == lines, (
             f"{label}: {len(text.splitlines())} lines, not {lines} -- the wall is back"
         )
-        assert f"cd {CLONE_DIR} " in text, f"{label}: the friend has to cd into the folder git made"
-        block = re.search(r"<pre>(.*?)</pre>", text, re.DOTALL)
-        assert block and CLONE_URL in block.group(1), (
-            f"{label}: the pasteable part must be inside the code block or nothing offers to copy it"
-        )
         for each in covers:
-            assert git_warning[each] in text, f"{label}: {each} lost its git obstacle"
-            assert f"./{LAUNCHER_FILE[each]}" in text, f"{label}: must open {each}'s launcher, not stop at the folder"
-        for each in set(LAUNCHER_FILE) - set(covers):
-            assert LAUNCHER_FILE[each] not in text, f"{label} must not name {each}'s launcher"
+            assert obstacle[each] in text, f"{label}: {each} lost its own obstacle"
+            assert handed[each] in text, f"{label}: {each} is not handed what it needs"
+        for each in set(handed) - set(covers):
+            assert handed[each] not in text, f"{label} must not hand out {each}'s half"
+        # Never, on any platform: a downloaded copy that is told to open the launcher
+        # directly stops updating, silently and for good.
+        assert LAUNCHER_FILE["windows"] not in text, (
+            f"{label}: run-bot.cmd is the file the bootstrap hands off to, never the "
+            f"one a friend is sent to -- opening it directly skips every update"
+        )
+        if "mac" in covers:
+            assert f"cd {CLONE_DIR} " in text, f"{label}: the friend has to cd into the folder git made"
+            block = re.search(r"<pre>(.*?)</pre>", text, re.DOTALL)
+            assert block and CLONE_URL in block.group(1), (
+                f"{label}: the pasteable part must be inside the code block or nothing offers to copy it"
+            )
+        if covers == ("windows",):
+            # The point of the whole change: Windows is not sent to install anything.
+            assert "<pre>" not in text, (
+                f"{label}: there is nothing to paste, and a URL inside a code block is not tappable"
+            )
+            assert CLONE_URL not in text and "git-scm.com" not in text, (
+                f"{label}: the download exists so that this friend needs no git at all"
+            )
         # The second obstacle, and the only one that is the same on both platforms.
         assert "token" in text and "dueño" in text, f"{label}: the token comes from the owner, separately"
         # Escaping, which is the trap that comes with introducing a parse mode. The
         # && in the pasted command is the character that bites: raw, Telegram may
-        # swallow it or reject the message.
-        assert "&amp;&amp;" in text, f"{label}: the shell && must be HTML-escaped"
+        # swallow it or reject the message. Only macOS has one to escape now -- the
+        # Windows reply has no shell command in it at all, which is the point of it.
+        if "mac" in covers:
+            assert "&amp;&amp;" in text, f"{label}: the shell && must be HTML-escaped"
         assert "&&" not in text, f"{label}: a raw && survived escaping"
         stripped = ALLOWED_HTML.sub("", text)
         assert "<" not in stripped and ">" not in stripped, (
@@ -4385,7 +4476,48 @@ def _check_install_instructions() -> None:
     else:
         pinned = "origin not readable here, URL not pinned"
 
-    print(f"ok  the bot hands out its own installer and never the token ({pinned})")
+    # --- the file the reply links to has to be the one in this repository -----------
+    # The bootstrap is a fourth place the repository is named -- CLONE_URL, the reply's
+    # derived link, EMPEZAR-ACA.md and the archive URL inside the .cmd -- and the reply
+    # hands out a link to it, so a disagreement means a friend downloads a file that
+    # fetches somebody else's repository.
+    #
+    # There is exactly one legitimate reason for the file to be missing, and the skip
+    # has to be pinned to it rather than to the absence: a copy the bootstrap unpacked
+    # does not contain the bootstrap, because it excludes itself from its own unpack,
+    # and it is the `.tarball-install` stamp that says so. Skipping on absence alone
+    # was a hole -- mutation testing caught it: renaming BOOTSTRAP_FILE without
+    # renaming the file made this check quietly skip itself while the reply handed out
+    # a link to a file that is not in the repository.
+    here = Path(__file__).resolve().parent
+    bootstrap = here / BOOTSTRAP_FILE
+    if not bootstrap.exists():
+        assert (here / ".tarball-install").exists(), (
+            f"{BOOTSTRAP_FILE} is not in this checkout, and no .tarball-install stamp "
+            f"explains why: /instalar windows hands out a link to a file that does not "
+            f"exist in the repository"
+        )
+    if bootstrap.exists():
+        body = bootstrap.read_text(encoding="ascii")
+        archive_url = (
+            CLONE_URL.replace("https://github.com/", "https://codeload.github.com/", 1).removesuffix(".git")
+            + "/tar.gz/refs/heads/main"
+        )
+        assert archive_url in body, (
+            f"{BOOTSTRAP_FILE} does not fetch {archive_url}: the link the bot hands out "
+            f"and the repository that file downloads have drifted apart"
+        )
+        # The exclude keeps the running .cmd from being overwritten by its own unpack,
+        # so it has to name this file. A rename that forgets it would put a second .cmd
+        # in the friend's folder and overwrite a batch file while cmd.exe reads it.
+        assert f'--exclude "*/{BOOTSTRAP_FILE}"' in body, (
+            f"{BOOTSTRAP_FILE} must exclude itself from its own unpack"
+        )
+        linked = "and the .cmd it links to fetches the same repo"
+    else:
+        linked = f"{BOOTSTRAP_FILE} absent here, its URL not pinned"
+
+    print(f"ok  the bot hands out its own installer and never the token ({pinned}, {linked})")
 
 
 def _self_check() -> None:
