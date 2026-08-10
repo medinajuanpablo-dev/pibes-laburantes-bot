@@ -588,3 +588,33 @@ agent to refute *me* if my measurement is wrong.
 Incumbent yielded at exactly 60 s (`the conflict lasted 60 s; stopping so the window says so`), stopped
 cleanly, printed the Spanish line for the person at the window, and **exactly one instance survived.** The
 baton pass still works with the backlog kept.
+
+## GOAL COMPLETE — all five criteria verified on the merged tip `4f698e8`
+
+| # | Criterion | Verified how |
+|---|---|---|
+| 1 | A live stream never starts downloading | **6 real live URLs, 0 bytes each**, re-confirmed on the final tip: refused, 0 bytes. Unguarded the same call wrote 2,097,152 bytes in 20 s and had to be killed |
+| 2 | A finished stream still delivers | Final tip: `zo5oewEQbsE` **accepted**, `was_live=True`, `is_live_stream()` → `False`. This is the silent regression the guard could have caused |
+| 3 | `is_supported` never raises | Final tip: three unparseable shapes answered, none raised, **and a real reel still returns `True`** (the control that stops "refuse everything" from passing). Live: poison + good reel in one message → the reel delivered |
+| 4 | A gap link arrives | **Bot off 19:19:30 → owner pasted a reel → bot up 19:26:50 → delivered 19:26:55**, four seconds |
+| 5 | Gates green, mutations red | `--self-check` EXIT=0 on the trunk after every merge. 30 + 7 + 2 mutations from the agents; **I re-ran five myself**, in both directions |
+
+### Stop evidence
+- **Landings audited this GOAL: 4** (orders 15, 14 slices 1-3, 16, 17), all four layers each, all APPROVED.
+- **Live-layer debt: none.** Every landing had a real live layer except order 17, which is **N/A and
+  justified**: its AST, token stream and bytecode are byte-identical to the parent, so it has no runtime
+  surface by construction — I verified the AST hash myself rather than taking the agent's word.
+- **Defects found and fixed: 3** (unbounded live download, unparseable URL killing a message, links lost
+  in a hosting gap). Plus the token-in-the-log leak fixed in the AUTO round that preceded this.
+- **My own errors this GOAL: 9**, every one caught by an agent or by my own control arm — see the
+  landings above. The pattern worth keeping: **three were instrument failures**, and all three were
+  truncation or a missing binary corrupting a measurement.
+
+### Open, deliberately
+| Item | Why it stays open |
+|---|---|
+| `is_upcoming` (a premiere) | Unmeasured in both directions; I went looking and there were none. The `ponytail:` says so rather than guessing |
+| `post_live` | Bounded by definition and may simply work. Earns a measurement before a line |
+| Windows launcher + bootstrap | No Windows machine exists in this run |
+| `.claude/` untracked and unignored | A blind `git add -A` would commit the worktrees. `.gitignore` is config, so it is an order — rides along with the next one |
+| Mixed photo/video carousels · `img_index` · parallel links | Unchanged from before; none earned promotion this round |
