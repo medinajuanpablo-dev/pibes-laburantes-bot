@@ -1242,6 +1242,32 @@ Four things about it:
 process that is not running sends no messages. No heartbeat, no watchdog, no status ping, no second
 process — the mitigation is the baton pass (§2.1), where somebody else starts hosting.
 
+### 5.5 The rot arrived — 2026-08-18, and why the pin is a nightly
+
+The failure mode this section predicted happened, and this is what it looked like from the inside:
+every YouTube link bouncing with *"no pude bajar ese link"*, twice in the ledger for the same URL.
+
+| what was tried | result |
+|---|---|
+| the pasted link, yt-dlp **2026.7.4** (the pin), the bot's own `download_into`, 3×| `ERROR: unable to download video data: HTTP Error 403: Forbidden` |
+| two unrelated videos, including the self-check's own reference clip `jNQXAC9IVRw` | the same 403 — **not the link, all of YouTube** |
+| `--js-runtimes node` (the deprecation warning yt-dlp prints) | same 403; the warning was a red herring |
+| `player_client=tv` / `web_safari` / `ios` / `mweb` | *DRM protected* on `tv`, *requested format is not available* on the rest |
+| latest **stable** on PyPI | `2026.7.4` — already the pin. There was no stable to bump to |
+| the **nightly**, `2026.8.18.122307.dev0` | every video downloads; **the whole self-check passes**, six real downloads |
+
+Two things were checked before accepting a nightly as the pin, because both would fail silently:
+
+- **`match_filter` still runs where the live-stream guard needs it** (§4.13): `_match_entry` is still
+  called from `process_video_result` at line **3042**, still passes `incomplete=` as a keyword, and
+  still prompts on `NO_DEFAULT` at **1636** — same three line numbers as 2026.7.4.
+- **The exact `.dev0` version installs without `--pre`**, which neither launcher passes. pip accepts a
+  pre-release when it is pinned exactly; `==2026.8.18.122307` (no `.dev0`) does **not** resolve at all.
+
+`--test` downloads only the first 10 kB and it **succeeded against the broken pin**, which is exactly
+the trap: a probe that reads the first chunk proves nothing about a download. Every verdict above
+came from a full download.
+
 ---
 
 ## 6. Deliberately not built
@@ -1279,7 +1305,7 @@ bot.py                    the whole application, plus its self-check
 run-bot.command           the macOS launcher. Committed 100755 or it does not double-click.
 run-bot.cmd               the Windows launcher. Untested on real Windows.
 instalar-bot.cmd          the Windows bootstrap: what /instalar windows links to. §2.2. Untested.
-requirements.txt          pinned: yt-dlp[default,curl-cffi]==2026.7.4, python-telegram-bot==22.8
+requirements.txt          the pins, and why yt-dlp is on a nightly — read the file, it says
 README.md                 this file
 EMPEZAR-ACA.md            the friend-facing quickstart, in Spanish. Product copy, not docs.
 AGENTS.md                 the rules an agent must not violate, plus routing

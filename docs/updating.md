@@ -90,6 +90,13 @@ The asymmetry is the whole reason this exists on Windows only: a `.cmd` needs no
 git commit -am "Bump yt-dlp to …" && git push
 ```
 
+**When `-U` changes nothing because the pin is already the newest stable** — what 2026-08-18 looked
+like, with all of YouTube 403ing (`README.md` §5.5) — the fix is the nightly channel:
+`pip install -U --pre yt-dlp`. Pin the **exact** version *including* its `.dev0` suffix: pip resolves
+a pre-release only when it is pinned exactly, and neither launcher passes `--pre`. Re-pin to the next
+stable once it ships. And never verify a bump with `--test`: it fetches 10 kB and passed against the
+very pin that could not download a single video.
+
 The launchers reinstall when `requirements.txt` changes, not only when the venv is missing — macOS
 compares a sha256 stamp in `.venv/.requirements-sha256`, Windows compares the file itself against
 `.venv\requirements-installed.txt`. So a pushed bump applies on the next double-click.

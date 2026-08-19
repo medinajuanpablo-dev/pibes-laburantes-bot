@@ -1,4 +1,13 @@
-# Pinned on 2026-08-07. Both were the latest releases on PyPI that day.
+# python-telegram-bot pinned on 2026-08-07, yt-dlp bumped on 2026-08-18.
 # yt-dlp is the part that rots: see the Operations section of README.md.
-yt-dlp[default,curl-cffi]==2026.7.4
+#
+# yt-dlp is a NIGHTLY here, on purpose. On 2026-08-18 the stable 2026.7.4 -- still the
+# newest stable on PyPI that day -- answered HTTP 403 "unable to download video data"
+# on EVERY YouTube video, the self-check's own reference clip included; the group's
+# links had been bouncing with "no pude bajar ese link". This nightly downloads them
+# all and the whole self-check passes. Re-pin to the next stable once it ships.
+#
+# The exact `.dev0` version is what makes this installable: pip accepts a pre-release
+# only when it is pinned exactly, and the launchers do not pass --pre.
+yt-dlp[default,curl-cffi]==2026.8.18.122307.dev0
 python-telegram-bot==22.8
