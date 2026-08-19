@@ -15,6 +15,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | the Windows download, the bootstrap, and **which copy updates how** | `README.md` §2.2 + `docs/updating.md` ← read before touching `instalar-bot.cmd` or either update path |
 | how the owner ships a change, bumps a pin, sets up a new host | `docs/updating.md` |
 | the 24/7 machine: `serve.py`, `run-server.cmd`, `/apagar`, why the supervisor never fights for the token | `docs/server.md` ← read before touching either of those files or the mute switch |
+| why the host is a Debian VM on Windows 7, its sizing, and the measurements that killed every Windows-7-native option | `docs/server-vm.md` |
 | what a friend hosting the bot is told (Spanish, product copy) | `EMPEZAR-ACA.md` |
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |
@@ -36,12 +37,17 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 1. **One file until it hurts.** No `src/`, no packages, no class hierarchy, no plugin registry, no
    dependency injection. A second file needs its reason in the commit message.
 2. **Nothing OS-specific in `bot.py`.** It gets copied onto an old Linux box. No `/opt/homebrew`
-   paths, no `launchd`, no Homebrew assumptions. Resolve ffmpeg from `PATH`. The two launchers and
-   the Windows bootstrap are the only OS-specific files here, that is what they are for, and none of
-   it may leak inwards. **Describing a platform is text, not behaviour**: `/instalar` naming a
+   paths, no `launchd`, no Homebrew assumptions. Resolve ffmpeg from `PATH`. The two launchers, the Windows
+   bootstrap, `run-server.cmd` and `instalar-servidor.sh` are the only OS-specific files here, that
+   is what they are for, and none of it may leak inwards. `serve.py` is NOT one of them: it
+   supervises the bot on any OS, and the systemd unit that starts it is written by the installer. **Describing a platform is text, not behaviour**: `/instalar` naming a
    platform's obstacle is copy, and it still reads nothing about the machine it runs on.
-3. **No database, no job queue, no web framework, no Docker, no process manager.** At this volume
-   they are cost with no benefit. `systemd` belongs to the port, not here.
+3. **No database, no job queue, no web framework, no Docker.** At this volume they are cost with no
+   benefit. **One process manager exists and it is the exception, not the pattern:** `serve.py`,
+   because the always-on host has nobody in front of it to restart anything (`docs/server.md`). Its
+   boundary is absolute -- `bot.py` does not know it exists, imports nothing from it and behaves
+   identically without it, and `systemd`/`run-server.cmd` only start `serve.py`. Anything else that
+   wants to supervise, schedule or orchestrate still needs its reason in the commit message.
 4. **Secrets never enter git.** The token is `TELEGRAM_BOT_TOKEN` from the environment, kept in a
    gitignored `.env`. Never a default, never an example, never a comment. Run `git status` before
    every commit and stage explicit paths — never `git add .` or `git add -A`.

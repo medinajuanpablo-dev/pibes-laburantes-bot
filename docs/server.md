@@ -5,9 +5,14 @@ Load when: setting up or debugging the machine that hosts the bot 24/7, or worki
 launchers (`run-bot.command`, `run-bot.cmd`) — those are a person double-clicking, and
 every question they ask is answered by somebody who is sitting there.
 
-The machine: an old ASUS running Windows, somewhere the owner cannot reach most of the
-day. It is the **fallback host**, not an exclusive one — the owner still hosts from his
-laptop whenever he wants, and this machine gets out of the way and comes back by itself.
+The machine: a headless Debian VM on an old Windows 7 ASUS, somewhere the owner cannot
+reach most of the day. **Windows 7 cannot host the bot itself** -- its Python ceiling is
+3.8 and every current yt-dlp needs 3.10+, measured in `docs/server-vm.md`, which is where
+the VM, its sizing and the Linux install live. Read that first; this file is about what
+the supervisor does once it is running.
+
+It is the **fallback host**, not an exclusive one: the owner still hosts from his laptop
+whenever he wants, and this machine gets out of the way and comes back by itself.
 
 ## The three pieces
 
@@ -18,6 +23,11 @@ laptop whenever he wants, and this machine gets out of the way and comes back by
 | `/apagar` and `/prender` | the remote control, over Telegram, owner-only. Mutes the bot **without stopping the process**: `.paused` next to `bot.py` is the state, and it survives every restart |
 
 ## One-time setup on the machine
+
+**On Linux -- the actual host -- this whole section is one script:** `instalar-servidor.sh`
+does apt, the clone, the venv, the pins, the token and the systemd unit. See
+`docs/server-vm.md`. What follows is the **Windows** path, which applies to a Windows 10+
+machine and is kept because `run-server.cmd` exists for one.
 
 **Install it with `git clone`, NOT with `instalar-bot.cmd`.** The bootstrap exists for a
 friend who has no git: it downloads a source tarball, which leaves a folder that is not a

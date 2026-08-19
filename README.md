@@ -1062,7 +1062,7 @@ ledger recorded it in production, which is the cheapest measurement there is.
 
 | What happened | Matched on | The group hears |
 |---|---|---|
-| Instagram post restricted by audience | `this content isn't available to everyone` | *ese post de instagram no es público, no me deja verlo* |
+| Instagram post restricted by audience | `this content isn't available to everyone` | *instagram le puso una restricción de audiencia a ese post, no me deja verlo* |
 | Instagram post gone, private or auth-walled | `instagram sent an empty media response` | *…puede que sea privado o que ya no exista* |
 | An Instagram **profile** URL, not a post | `[instagram:user]` + `unable to extract data` | *ese link es de un perfil…, pasame el del reel o la foto* |
 | Facebook post dead **or** Facebook throttling | `[facebook]` + `cannot parse data` | *…puede que ya no exista o que facebook me esté frenando. probá de nuevo en un rato* |
@@ -1317,8 +1317,10 @@ README.md                 this file
 EMPEZAR-ACA.md            the friend-facing quickstart, in Spanish. Product copy, not docs.
 AGENTS.md                 the rules an agent must not violate, plus routing
 serve.py                  the always-on host's supervisor. Restarts bot.py, yields to the owner
+instalar-servidor.sh      one-shot installer for the Linux host: apt, clone, venv, pins, systemd
 run-server.cmd            the always-on host's launcher, Windows. Untested, like run-bot.cmd
 docs/server.md            the 24/7 machine: setup, the mute switch, what it cannot detect
+docs/server-vm.md         why that machine is a Debian VM on a Windows 7 desktop, and its sizing
 docs/updating.md          how the owner ships a change and how a new friend gets set up
 docs/history.md           how the project got here: measurements, killed premises, decisions
 docs/RUN-STATE.md         the full run log of the 2026-08-07 build session
