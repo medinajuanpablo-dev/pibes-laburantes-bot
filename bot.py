@@ -28,6 +28,7 @@ import unicodedata
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 from urllib.parse import urlparse
 
@@ -49,6 +50,13 @@ log = logging.getLogger("the-bot")
 
 TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
 COOKIES_ENV_VAR = "YTDLP_COOKIES"
+
+# Telegram user id of the owner, and the whole authorisation model of this file: the
+# only commands that change how the bot behaves (/apagar, /prender -- see on_pause)
+# are refused to everybody else. Unset means those two commands do not work at all,
+# which is the right default for the friends' laptops: nobody can mute the group's
+# bot by guessing a command. Only the always-on host needs it set (docs/server.md).
+OWNER_ENV_VAR = "TELEGRAM_OWNER_ID"
 
 # python-telegram-bot's HTTP client, and the one logger that may not run at INFO: it
 # logs every request with the full URL, and every Telegram API URL carries the token
@@ -463,14 +471,26 @@ FAILURE_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
 # Next to bot.py rather than in a config dir: this file IS the bot's directory on
 # every host, and .gitignore keeps the group's content out of git.
 #
-# ponytail: with a rotating host the ledger FRAGMENTS -- each friend's machine
-# records only the bounces it saw, and nothing merges them. That is the accepted
-# ceiling: at ~20 links a week, the owner reading his own file and asking a friend
-# to send theirs costs less than any sync would. Upgrade path, cheapest first:
-# ask each friend to send their rejected.jsonl and concatenate them (the format is
-# append-only lines, so `cat` is the merge); and only if that stops working, move
-# the bot to one always-on host. Not a server, not a database, not a sync loop.
+# ponytail: with a rotating host the ledger FRAGMENTS -- each machine records only
+# the bounces it saw, and nothing merges them. That is the accepted ceiling: at ~20
+# links a week, the owner reading one file and concatenating another costs less than
+# any sync would (the format is append-only lines, so `cat` is the merge).
+#
+# The upgrade path this comment used to end with -- "and only if that stops working,
+# move the bot to one always-on host" -- ARRIVED on 2026-08-19 (docs/server.md): the
+# ASUS hosts whenever the owner is not, so its ledger is now the near-complete one and
+# the fragments are the exception rather than the rule. Still not a server, not a
+# database, not a sync loop: the merge is still `cat`.
 REJECTED_LEDGER = Path(__file__).resolve().parent / "rejected.jsonl"
+
+# The mute switch. Its EXISTENCE is the state -- no contents to parse, no format to
+# get wrong, and `del`/`rm` is a valid way to un-mute from the keyboard of the host.
+#
+# A file and not a variable in memory, because the supervisor on the always-on host
+# restarts bot.py for any reason at all (crash, yielded poll, pulled update) and a mute
+# that a restart silently cancelled would be worse than no mute: the owner is not there
+# to notice. A file and not a Telegram-side setting, because there is none.
+PAUSED_FLAG = Path(__file__).resolve().parent / ".paused"
 
 # A yt-dlp DownloadError message can be several hundred characters of URL and
 # advice. The first line is the diagnosis; the rest is noise in a ledger.
@@ -608,6 +628,16 @@ CLONE_PARENT = "~/Documents"
 
 INSTALL_COMMAND = "instalar"
 
+# The mute switch, as the owner types it. Spanish like every other word the group sees,
+# and deliberately NOT in BOT_COMMANDS: the command menu is a global bot setting that
+# every friend sees, and two commands only one person may use have no business there.
+PAUSE_COMMAND = "apagar"
+RESUME_COMMAND = "prender"
+
+PAUSE_REPLY = f"listo, me callo: no contesto más links. /{RESUME_COMMAND} para volver"
+RESUME_REPLY = "volví, mandá nomás"
+PAUSE_FAILED_REPLY = "no pude guardar eso en el disco de esta compu, así que sigo como estaba"
+
 # The launcher each platform ends at. The pasted line opens it directly instead of
 # stopping at the folder: the friend is already in a terminal at that point, and the
 # alternative -- "now go find the file and double-click it" -- is the step where
@@ -733,6 +763,63 @@ def read_token() -> str:
             f"privacy-mode step the bot silently needs."
         )
     return token
+
+
+def owner_id() -> int | None:
+    """The owner's Telegram user id, or None if this host was never told one.
+
+    None is not an error and not a warning: every friend's laptop runs without it, and
+    on those the two owner commands simply do not exist. Only the always-on host sets
+    it, because it is the only host nobody is sitting in front of.
+
+    A non-numeric value is None too -- a typo must not authorise anybody, and it must
+    not crash a bot that is otherwise fine either.
+    """
+    raw = os.environ.get(OWNER_ENV_VAR, "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        if raw:
+            log.warning("%s is set to %r, which is not a user id; ignoring it", OWNER_ENV_VAR, raw)
+        return None
+
+
+def is_owner(user_id: int | None) -> bool:
+    """Whether this user may work the mute switch. Fails CLOSED on every unknown.
+
+    Both None cases are refusals and they are different: no owner configured (the
+    friends' laptops, where the commands do not exist) and no user on the update (a
+    channel post carries no `from_user`). Neither may ever be equal to the other.
+    """
+    owner = owner_id()
+    return owner is not None and user_id is not None and user_id == owner
+
+
+def is_paused() -> bool:
+    """Whether the owner has muted the bot. One `stat` per message, deliberately.
+
+    Read from disk on every message rather than cached in memory, so `rm .paused` on
+    the host's keyboard works without a restart and there is exactly one source of
+    truth. A stat call is nothing next to the download that follows it.
+    """
+    return PAUSED_FLAG.exists()
+
+
+def set_paused(paused: bool) -> bool:
+    """Mute or un-mute. Returns whether the state on disk is now what was asked.
+
+    Never raises: this runs from a Telegram command handler on a machine nobody is
+    watching, and a read-only disk must produce a "no pude" reply to the owner, not an
+    exception that the error handler logs where he cannot read it.
+    """
+    try:
+        if paused:
+            PAUSED_FLAG.touch()
+        else:
+            PAUSED_FLAG.unlink(missing_ok=True)
+    except OSError:
+        log.exception("could not write the mute flag at %s", PAUSED_FLAG)
+    return is_paused() is paused
 
 
 def cookie_file() -> str | None:
@@ -2195,6 +2282,47 @@ async def on_install(update: telegram.Update, _context: object) -> None:
     )
 
 
+async def _on_switch(update: telegram.Update, paused: bool) -> None:
+    """/apagar and /prender, which are the same handler with the flag flipped.
+
+    SILENT to everybody who is not the owner, and that is the whole security model: a
+    friend who types /apagar gets nothing back -- not a refusal, not an explanation --
+    so the command does not advertise that it exists or that it did something for
+    somebody else. The attempt is logged with the id that made it, which is what turns
+    "somebody keeps muting the bot" into an answerable question.
+
+    The reply is sent only after the disk agrees, so the owner is never told the bot is
+    muted while it is still answering links.
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    user = update.effective_user
+    if not is_owner(getattr(user, "id", None)):
+        # Silence, like every other message the bot has no business answering
+        # (README.md §5.4). The id is the point of the line: it is also how the owner
+        # finds his own -- he sends the command once and reads it in this log.
+        log.info(
+            "user %s asked to %s the bot and is not the owner; ignoring",
+            getattr(user, "id", None),
+            PAUSE_COMMAND if paused else RESUME_COMMAND,
+        )
+        return
+    if not set_paused(paused):
+        await _reply_text(message, PAUSE_FAILED_REPLY)
+        return
+    log.warning("the owner %s the bot", "muted" if paused else "un-muted")
+    await _reply_text(message, PAUSE_REPLY if paused else RESUME_REPLY)
+
+
+async def on_pause(update: telegram.Update, _context: object) -> None:
+    await _on_switch(update, paused=True)
+
+
+async def on_resume(update: telegram.Update, _context: object) -> None:
+    await _on_switch(update, paused=False)
+
+
 async def on_message(update: telegram.Update, _context: object) -> None:
     """Everything the bot does with a message. Two reasons to react, in this order.
 
@@ -2210,6 +2338,13 @@ async def on_message(update: telegram.Update, _context: object) -> None:
     """
     message = update.effective_message
     if message is None:
+        return
+    if is_paused():
+        # Muted means muted for the group, not off for the owner: /prender is a command
+        # and commands do not come through here, so the switch can always be flipped
+        # back. Nothing is recorded either -- a muted bot did not bounce these links,
+        # it never tried, and writing them to the ledger would invent a failure.
+        log.info("message %s ignored: the owner muted the bot", message.message_id)
         return
     await _handle_links(message)
     await _handle_insult(message)
@@ -2608,6 +2743,8 @@ def build_application(token: str) -> Application:
     app = Application.builder().token(token).post_init(_publish_commands).build()
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler(INSTALL_COMMAND, on_install))
+    app.add_handler(CommandHandler(PAUSE_COMMAND, on_pause))
+    app.add_handler(CommandHandler(RESUME_COMMAND, on_resume))
     app.add_handler(MessageHandler(MESSAGE_FILTER, on_message))
     app.add_error_handler(on_error)
     return app
@@ -5073,6 +5210,88 @@ def _check_failure_path() -> None:
     print("ok  _deliver swallows a failing download AND a failing apology, and records it")
 
 
+class _SwitchMessage:
+    """A message from a given user id that records what was replied to it."""
+
+    def __init__(self, user_id: int | None) -> None:
+        self.message_id = 1
+        self.text = None
+        self.caption = None
+        self.effective_message = self
+        self.effective_user = None if user_id is None else SimpleNamespace(id=user_id)
+        self.sent: list[str] = []
+
+    async def reply_text(self, text: str, **_kwargs: object) -> None:
+        self.sent.append(text)
+
+
+def _check_pause_switch() -> None:
+    """The mute switch obeys the owner, nobody else, and survives a restart.
+
+    The whole point of this feature is a host nobody can reach, so the two failures
+    that matter are both silent: a stranger muting the group's bot, and a mute that a
+    restart quietly cancelled. Both are asserted here against the real flag file.
+
+    Driven through the handlers rather than the helpers, because the authorisation is
+    in the handler: asserting is_owner() alone would keep passing if the check were
+    ever dropped from _on_switch. Touches no network -- a Telegram command handler and
+    a file on disk is the whole feature.
+    """
+    original = os.environ.get(OWNER_ENV_VAR)
+    existed = PAUSED_FLAG.exists()
+    try:
+        os.environ.pop(OWNER_ENV_VAR, None)
+        PAUSED_FLAG.unlink(missing_ok=True)
+
+        # No owner configured: the command does not exist, on any laptop, for anybody.
+        stranger = _SwitchMessage(42)
+        asyncio.run(on_pause(stranger, None))
+        assert stranger.sent == [], f"an unconfigured host must answer nothing: {stranger.sent}"
+        assert not is_paused(), "an unconfigured host must not be muteable"
+
+        os.environ[OWNER_ENV_VAR] = "1001"
+        for label, user_id in (("a friend", 42), ("no user at all", None)):
+            other = _SwitchMessage(user_id)
+            asyncio.run(on_pause(other, None))
+            assert other.sent == [], f"{label} must get silence, not a refusal: {other.sent}"
+            assert not is_paused(), f"{label} must not be able to mute the bot"
+
+        owner = _SwitchMessage(1001)
+        asyncio.run(on_pause(owner, None))
+        assert is_paused(), "the owner's /apagar did not land on disk"
+        assert owner.sent == [PAUSE_REPLY], owner.sent
+        # The flag is a file, so a fresh process sees it: this is the restart.
+        assert PAUSED_FLAG.exists(), "the mute must outlive the process that set it"
+
+        # Muted, the bot answers no links and records nothing -- and the switch still
+        # comes back, which is what makes an unreachable host safe to mute.
+        silent = _SwitchMessage(1001)
+        silent.text = "https://youtu.be/abc"
+        asyncio.run(on_message(silent, None))
+        assert silent.sent == [], f"a muted bot must not answer links: {silent.sent}"
+
+        back = _SwitchMessage(1001)
+        asyncio.run(on_resume(back, None))
+        assert not is_paused(), "the owner's /prender did not clear the flag"
+        assert back.sent == [RESUME_REPLY], back.sent
+
+        # A typo in the environment authorises nobody. This is the one that would
+        # otherwise fail open on a host the owner cannot log into.
+        os.environ[OWNER_ENV_VAR] = "not-a-number"
+        assert owner_id() is None, "a malformed owner id must not resolve"
+        typo = _SwitchMessage(1001)
+        asyncio.run(on_pause(typo, None))
+        assert typo.sent == [] and not is_paused(), "a malformed owner id must authorise nobody"
+    finally:
+        PAUSED_FLAG.unlink(missing_ok=True)
+        if existed:
+            PAUSED_FLAG.touch()
+        os.environ.pop(OWNER_ENV_VAR, None)
+        if original is not None:
+            os.environ[OWNER_ENV_VAR] = original
+    print("ok  only the owner works the mute switch, and it outlives a restart")
+
+
 def _check_take_over_intent() -> None:
     """The launcher's answer has to reach the bot, and nothing else may look like it.
 
@@ -5746,6 +5965,7 @@ def _self_check() -> None:
     _check_insult_detection()
     _check_album_delivery()
     _check_failure_path()
+    _check_pause_switch()
     _check_take_over_intent()
     _check_conflict_handling()
     _check_startup_keeps_the_backlog()

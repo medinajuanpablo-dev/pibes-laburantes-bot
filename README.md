@@ -132,6 +132,13 @@ how the group ends up with no bot at all.
 The owner cannot keep his laptop on all the time, so hosting rotates: whoever is around
 double-clicks a launcher and hosts the bot until they close the window. `run-bot.command` is the
 macOS one, `run-bot.cmd` the Windows one (**untested on real Windows** — see `docs/updating.md`).
+
+**Since 2026-08-19 the rotation has a floor:** an old always-on Windows machine runs `serve.py`,
+which hosts the bot whenever nobody else is, yields the moment the owner starts his own laptop, and
+takes the poll back by itself within five minutes of him closing it. So a gap in which nobody polls
+is no longer the normal state — it is a failure now. Everything about that machine, including the
+owner-only `/apagar` mute switch that stops the bot answering **without stopping the process**, is in
+`docs/server.md`.
 Each one checks for updates, Python 3.11+, ffmpeg, the venv, the token and whether anybody else is
 already polling, and prints one Spanish sentence per failure. The friend-facing instructions are
 `EMPEZAR-ACA.md`, in Spanish, because the audience is.
@@ -1309,6 +1316,9 @@ requirements.txt          the pins, and why yt-dlp is on a nightly — read the 
 README.md                 this file
 EMPEZAR-ACA.md            the friend-facing quickstart, in Spanish. Product copy, not docs.
 AGENTS.md                 the rules an agent must not violate, plus routing
+serve.py                  the always-on host's supervisor. Restarts bot.py, yields to the owner
+run-server.cmd            the always-on host's launcher, Windows. Untested, like run-bot.cmd
+docs/server.md            the 24/7 machine: setup, the mute switch, what it cannot detect
 docs/updating.md          how the owner ships a change and how a new friend gets set up
 docs/history.md           how the project got here: measurements, killed premises, decisions
 docs/RUN-STATE.md         the full run log of the 2026-08-07 build session

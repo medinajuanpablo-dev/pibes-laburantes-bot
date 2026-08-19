@@ -14,6 +14,7 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
 | `/instalar`, its line budget, why it is a message and not an attachment, the one parse mode in this file | `README.md` §2.2 ← read before touching `install_reply` |
 | the Windows download, the bootstrap, and **which copy updates how** | `README.md` §2.2 + `docs/updating.md` ← read before touching `instalar-bot.cmd` or either update path |
 | how the owner ships a change, bumps a pin, sets up a new host | `docs/updating.md` |
+| the 24/7 machine: `serve.py`, `run-server.cmd`, `/apagar`, why the supervisor never fights for the token | `docs/server.md` ← read before touching either of those files or the mute switch |
 | what a friend hosting the bot is told (Spanish, product copy) | `EMPEZAR-ACA.md` |
 | privacy mode / why the bot sees nothing in a group | `README.md` §3 |
 | **every measured fact — codecs, sizes, ceilings, timeouts** | `README.md` §4 ← read before touching `MEDIA_FORMAT` or any timeout |

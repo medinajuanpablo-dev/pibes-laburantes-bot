@@ -7,3 +7,7 @@ __pycache__/
 .DS_Store
 rejected.jsonl
 insults.jsonl
+.paused
+server.log
+server.log.*
+.claude/
