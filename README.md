@@ -606,6 +606,21 @@ would turn the question into a remote kill switch. `CONFLICT_GRACE` (60 s) is si
 blip; `CONFLICT_EPISODE_GAP` (45 s) is above python-telegram-bot's own retry backoff, which grows
 1.5× per failure and is **capped at 30 s** (`telegram/ext/_utils/networkloop.py`).
 
+#### The probe has to long-poll — measured 2026-08-18
+
+A new `getUpdates` **never loses the race**: it terminates whichever poll is outstanding and answers
+200 itself. The launcher's probe was a `timeout=0` `getUpdates`, so it could never see a 409 — the
+detection was inverted, and the whole take-over path above was unreachable in practice:
+
+| the probe | with somebody polling | what the friend saw |
+|---|---|---|
+| `timeout=0` (until 2026-08-18) | **200** — it stole the poll and won | *"Nadie más lo tiene. Arrancamos."*, then the incumbent's retry displaced the instance just started, which announced *"Otra persona prendió el bot"* ~5 s later and stopped. Both sides could reach `give-up`: the group ends with no bot |
+| `timeout=10` (now) | **409 in 4 s** — this probe is the incumbent, the other side displaces *it* | the *"¿Se lo saco?"* question, which is the whole point of §6 |
+
+With nobody polling, the long probe answers 200 after the full 10 s (measured 11 s), which is the
+price of the question: a normal start waits ten seconds before the bot comes up. Neither probe passes
+`offset`, so neither confirms anything and the backlog survives (`docs/RUN-STATE.md`).
+
 #### Two instances, measured 2026-08-09 — and why the hand-over needs a flag
 
 The first run of the real thing, one host taking the baton from another on the real token:

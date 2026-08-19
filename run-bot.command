@@ -151,11 +151,23 @@ set +a
 # "Conflict: terminated by other getUpdates request". Asking is the whole point of
 # this step -- without it the friend just sees a bot that answers nothing.
 #
-# The cost, measured and accepted: this probe momentarily steals the poll from
-# whoever is running, so their window logs one line about another instance and
-# recovers. There is no side-effect-free way to ask Telegram "is anybody polling?".
+# The probe LONG-POLLS, and that is the whole trick: a new getUpdates never loses the
+# race, it terminates whichever poll is outstanding and answers 200 itself. So the
+# `timeout=0` probe this used until 2026-08-18 could not detect anybody -- it always
+# got 200, always printed "nobody has it", and then the incumbent's retry displaced
+# the instance we had just started, which announced defeat and stopped. The 409 branch
+# below was unreachable, so the take-over question was never asked (README.md §4.9).
+# Holding the poll for 10 s inverts it: this probe becomes the incumbent, and the
+# other side's next getUpdates displaces US. Measured 2026-08-18: 409 in 4 s with
+# somebody polling, 200 after 11 s with nobody.
+#
+# The cost, measured and accepted: this probe steals the poll from whoever is running
+# for those seconds, so their window logs one line about another instance and recovers.
+# There is no side-effect-free way to ask Telegram "is anybody polling?".
 # A lock file is not the answer -- it would live on the wrong machine and go stale.
 # bot.py tolerates this blip on purpose (see the conflict handling there).
+# No `offset`: Telegram only confirms updates when offset > update_id, so this reads
+# the backlog without eating it (docs/RUN-STATE.md).
 #
 # The answer to the question below is the ONLY thing that tells two running instances
 # apart: Telegram hands both of them the same 409 and designates no winner, so without
@@ -164,9 +176,9 @@ set +a
 # above could leave behind can turn a normal start into a take-over.
 TAKE_OVER=""
 say ""
-say "Fijándome si alguien más lo tiene prendido..."
-code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=0&limit=1")"
+say "Fijándome si alguien más lo tiene prendido (tarda unos segundos)..."
+code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?timeout=10&limit=1")"
 
 case "$code" in
     200)

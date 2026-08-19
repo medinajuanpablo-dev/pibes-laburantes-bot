@@ -168,17 +168,21 @@ if not defined TELEGRAM_BOT_TOKEN (
 
 rem --- 6. One at a time ----------------------------------------------------------
 rem Telegram allows exactly one poller per token; a second one gets HTTP 409.
-rem The cost, accepted: this probe momentarily steals the poll from whoever is
-rem running, so their window logs one line and recovers. bot.py tolerates that
+rem The probe LONG-POLLS on purpose: a new getUpdates never loses the race, so the
+rem timeout=0 probe used until 2026-08-18 always got 200 and never detected anybody
+rem -- see the long comment in run-bot.command and README.md seccion 4.9. Holding
+rem the poll for 10 s makes the OTHER side displace us, which is the 409 we want.
+rem The cost, accepted: this probe steals the poll from whoever is running for those
+rem seconds, so their window logs one line and recovers. bot.py tolerates that
 rem blip on purpose. curl ships with Windows 10 1803 and later; older machines
 rem skip the question rather than fail.
 rem The URL carries no & on purpose -- escaping it inside a for /f is a classic
 rem way to break a batch file, and the limit parameter buys nothing here.
 echo.
 where curl >nul 2>&1 || goto :run
-echo Fijandome si alguien mas lo tiene prendido...
+echo Fijandome si alguien mas lo tiene prendido (tarda unos segundos)...
 set "CODE="
-for /f %%C in ('curl -s -o NUL -w "%%{http_code}" --max-time 20 "https://api.telegram.org/bot%TELEGRAM_BOT_TOKEN%/getUpdates?timeout=0"') do set "CODE=%%C"
+for /f %%C in ('curl -s -o NUL -w "%%{http_code}" --max-time 25 "https://api.telegram.org/bot%TELEGRAM_BOT_TOKEN%/getUpdates?timeout=10"') do set "CODE=%%C"
 if "%CODE%"=="200" echo Nadie mas lo tiene. Arrancamos.
 if "%CODE%"=="401" goto :badtoken
 if not "%CODE%"=="409" goto :run

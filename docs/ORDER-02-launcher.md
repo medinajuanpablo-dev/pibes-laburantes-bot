@@ -85,6 +85,10 @@ On every run, in order, each step printing **one short Spanish line** on failure
    never be baked into this script or any tracked file** — the package has to be safe to pass around
    on its own, with the token sent separately by whatever channel the owner chooses.
 5. **The one-at-a-time check.** Call `getUpdates` with `timeout=0` once. On HTTP **409**, someone
+   <br>⚠️ **Superseded 2026-08-18: `timeout=0` cannot detect anybody** — a new `getUpdates` always
+   wins the race and answers 200, so this step never asked the question and the started instance was
+   killed by the incumbent's retry instead. The probe now long-polls (`timeout=10`) so the *other*
+   side displaces it. Shipped in both launchers; see README.md §4.9.
    else is running it: say so in Spanish, explain that only one person can have it on at a time, and
    ask whether to take over. Exit quietly if they say no.
    - **Name the cost honestly in a comment:** this probe momentarily steals the poll from whoever is
