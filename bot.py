@@ -396,7 +396,7 @@ LIVE_STREAM_REPLY = "ese link es una transmisión en vivo, no puedo bajarla hast
 FAILURE_SIGNATURES: tuple[tuple[tuple[str, ...], str], ...] = (
     # instagram.com/reel/DbpG4CuSKoG/ -- the real bounce that prompted all of this.
     (("this content isn't available to everyone",),
-     "ese post de instagram no es público, no me deja verlo"),
+     "instagram le puso una restricción de audiencia a ese post, no me deja verlo"),
     # instagram.com/reel/AAAAAAAAAAA/ -- also what an auth-walled post gives.
     (("instagram sent an empty media response",),
      "no puedo ver ese post de instagram: puede que sea privado o que ya no exista"),
@@ -3450,7 +3450,7 @@ def _check_failure_replies() -> None:
     assert "probá de nuevo" in replies["facebook, dead post or throttled"], \
         "throttling is temporary, so the facebook line has to say to retry"
     assert "perfil" in replies["instagram, a profile URL not a post"], replies
-    assert "no es público" in replies["instagram, audience-restricted"], replies
+    assert "restricción de audiencia" in replies["instagram, audience-restricted"], replies
 
     # The fourth hedge is a different KIND of hedge and gets its own asserts. The
     # other three cannot tell two causes apart; this one cannot tell whose network
