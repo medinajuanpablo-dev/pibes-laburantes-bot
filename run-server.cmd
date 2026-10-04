@@ -13,7 +13,10 @@ rem It does NOT set the machine up. run-bot.cmd is what installs Python's venv, 
 rem dependencies and the token; this file expects that to have happened once, and
 rem says so rather than asking a question nobody is there to answer.
 rem
-rem NOT TESTED ON WINDOWS, like run-bot.cmd. Written on a Mac.
+rem The loop below was proven on Windows 11 on 2026-10-04, with a stand-in that
+rem exits at once: it restarts every ~10 s. It only does so with CRLF endings --
+rem committed LF, cmd.exe could not find :loop and it died on the first restart.
+rem .gitattributes now pins that. serve.py itself has not run under it.
 rem
 rem The Spanish below carries no accents on purpose: cmd.exe reads this file in the
 rem console's OEM codepage and UTF-8 accents come out as mojibake.

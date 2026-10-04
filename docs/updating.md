@@ -123,15 +123,36 @@ it is rejected with `userCanceledErr` and never runs, while the cloned file runs
 A hand-unpacked zip is worse still on either platform: with no `.git` **and** no `.tarball-install`
 stamp it has no updater at all, and it says so.
 
-## Windows: what nobody has verified
+## Windows: what has run, and what nobody has watched yet
 
-**Both Windows files were written on a Mac and neither has ever run on Windows** — `run-bot.cmd` and
-`instalar-bot.cmd`. They are checked only for what is checkable from macOS: ASCII-only text, CRLF
-line endings, every `goto` has a label, no `if cond a & b` (which chains unconditionally), no
-unescaped `&` inside a `for /f`, `set "VAR=value"` always quoted, and **every expansion of a path
-quoted, `echo` included** — a Windows account name may legally contain `&`, and an unquoted
-`echo … %TARGET%` would end the command there and try to run the rest of the path. Say **untested**,
-in that word, until somebody watches them.
+**First real Windows run: 2026-10-04** — Windows 11 (build 26200), Python 3.13.15, Git for Windows.
+Both files were driven through `cmd.exe` up to the token prompt with **no token**; the bootstrap into
+a throwaway `%USERPROFILE%`. Observed:
+
+| Step | Result |
+|---|---|
+| `run-bot.cmd` update check, on a clone | `Ya tenias la ultima version.` |
+| Python check | `py -3` found 3.13 |
+| ffmpeg missing → `winget install Gyan.FFmpeg` | installed 9.0.2 **and found in the same window** — only because `%LOCALAPPDATA%\Microsoft\WinGet\Links` was already on `PATH` from an earlier winget install. The "reopen the window" branch is still unwatched |
+| first run: venv, `fc /b` against the missing stamp, `pip install` | as written |
+| empty token | the right sentence, exit 1 |
+| `instalar-bot.cmd`: `curl`, `tar -C "C:\…" --strip-components --exclude`, the stamp, the hand-off | unpacked without the installer, wrote `.tarball-install` (`%DATE% %TIME%` in the machine's locale), `call`ed `run-bot.cmd`, which printed the tarball-copy line |
+| `bot.py --self-check` | everything passed except the `instagram image` fixture: that post no longer answers anonymously, identically on the newest yt-dlp nightly, while the image carousel beside it downloads. Instagram's, not Windows' |
+
+**One bug, found and fixed that day.** `run-server.cmd` was committed with LF endings, codeload
+shipped it that way, and cmd.exe could not find its own `:loop` label: the supervisor died on its
+first restart. A/B on the same file for 25 s: LF restarted once and printed *"no encuentra la
+etiqueta por lotes especificada: loop"*, CRLF restarted three times. A clone with
+`core.autocrlf=true` always hid it. `.gitattributes` now pins `*.cmd` to CRLF in every checkout and
+in `git archive`, which is what codeload serves.
+
+Still **unwatched**, in that word: everything after the token — the 409 probe, the take-over question,
+the bot running in the window, Ctrl-C — plus whatever below needs a browser download or a machine
+without Python. And the static rules still bind every edit: ASCII-only text, every `goto` has a
+label, no `if cond a & b` (which chains unconditionally), no unescaped `&` inside a `for /f`,
+`set "VAR=value"` always quoted, and **every expansion of a path quoted, `echo` included** — a
+Windows account name may legally contain `&`, and an unquoted `echo … %TARGET%` would end the
+command there and try to run the rest of the path.
 
 ### The bootstrap: what was measured here, and what could not be
 
@@ -150,11 +171,9 @@ The implementation was `bsdtar 3.5.3 / libarchive 3.5.3` — the same implementa
 `System32\tar.exe`, which is why those results carry over as well as anything can without a Windows
 machine. **They are not a Windows run.**
 
-**Nothing about the script's execution is verified.** In particular, watch for:
+Its execution from a local file is now verified (the table above). What a run from a **browser
+download** adds is not, so watch for:
 
-- **Whether cmd.exe runs the file at all.** Parsing, the `> "file" echo …` redirection idiom, and
-  `%DATE% %TIME%` in the stamp are all read from the platform's documentation and from `run-bot.cmd`,
-  which is itself untested.
 - **The download.** A browser gets `content-type: text/plain` with no `content-disposition` from
   raw.githubusercontent.com (measured), so Chrome and Edge will very likely **render the file as text
   instead of downloading it** and the friend has to save it (Ctrl+S). That is the single most likely
@@ -170,17 +189,14 @@ machine. **They are not a Windows run.**
   word of copy in `bot.py` and one in `EMPEZAR-ACA.md` depend on it. Worth watching for a third
   possibility on a clean Windows 11: Smart App Control blocking it outright rather than asking, which
   no wording can rescue.
-- **`System32\curl.exe` and `System32\tar.exe` existing on that machine.** Both shipped in Windows 10
-  build 17063 / 1803, so anything current has them; Windows 8.1 and older have neither, and the
-  script prints one Spanish line pointing at the git path instead of assuming. Both are called by
-  **full path** on purpose: a bare `tar` may resolve to Git for Windows' GNU tar, which reads
-  `C:\…` after `-f` as a remote host and fails.
+- **`System32\curl.exe` and `System32\tar.exe` on an OLD machine.** Both shipped in Windows 10
+  build 17063 / 1803; Windows 8.1 and older have neither, and the script prints one Spanish line
+  pointing at the git path instead of assuming. Both are called by **full path** on purpose: a bare
+  `tar` may resolve to Git for Windows' GNU tar, which reads `C:\…` after `-f` as a remote host and
+  fails — and the 2026-10-04 machine had exactly that GNU tar on `PATH`.
 - **`%USERPROFILE%\Documents`** being the Documents the friend actually sees. If Documents was
   redirected into OneDrive, this makes a plain local folder beside it — which is exactly what the
   `git clone` command already does, so the two paths at least agree.
-- **Windows' `tar.exe` accepting `-C "C:\…"`, `--strip-components` and `--exclude`.** Same codebase
-  as the one measured here, different build, never run there.
-- **The hand-off.** `call "…\run-bot.cmd"` and coming back to `exit /b`.
 
 ### The launcher
 
@@ -190,16 +206,15 @@ Watch the first Windows friend do it, and specifically watch for:
   is an App Execution Alias that opens the Microsoft Store — the script should still print its
   sentence, but the Store window appearing will look like a hang.
 - **Whether the accents were the right call.** The Spanish there is written without accents or `ñ`
-  because cmd.exe reads a `.cmd` in the console's OEM codepage. If it turns out the console renders
-  UTF-8 fine, the text can be improved.
-- **`fc /b` against a missing file** — the first-run path deletes the stamp and expects `fc` to
-  report a difference (errorlevel ≥ 1), not to fail in some other way.
+  because cmd.exe reads a `.cmd` in the console's OEM codepage. The ASCII reads fine (2026-10-04);
+  whether UTF-8 would have rendered is still untried.
 - **`certutil`/`curl` availability.** curl ships with Windows 10 1803 and later; on anything older
   the script skips the one-at-a-time question instead of failing, which means that friend can take
   the bot from somebody without being asked.
-- **`winget`.** After `winget install Gyan.FFmpeg`, `PATH` is not refreshed in the running console,
-  so the script tells them to reopen it. Confirm that is what actually happens.
+- **`winget` on a machine that never used it.** `PATH` is not refreshed in the running console, so
+  the script tells them to reopen it. Confirm that is what happens when `WinGet\Links` is not on
+  `PATH` yet — the 2026-10-04 machine already had it, so it never reached that line.
 - **`.env` has no `chmod 600` equivalent.** It is a plain file readable by that user's other
   programs. Upgrade path if it ever matters: `icacls`.
 
-Until somebody watches all of that, describe **both Windows files** as untested, in that word.
+Until somebody watches those, describe them — and nothing the table above shows — as untested.

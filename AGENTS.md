@@ -159,8 +159,8 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   it leaves a clone's tree dirty, `git pull --ff-only` then refuses it, and the download has
   destroyed the update channel of the one copy that had a working one. And **`git push` is still the
   entire release process for both kinds of copy**, because codeload serves the tip of `main`.
-  Everything about the *execution* of the two Windows files is **untested** — no Windows exists in
-  this project; `docs/updating.md` separates what was measured here from what was only read.
+  The two Windows files have run on Windows only **up to the token prompt** (2026-10-04);
+  `docs/updating.md` separates what ran from what is still unwatched.
 - **The install reply has a line budget and it is asserted exactly** — three lines per platform,
   five for both. It is a product decision, not formatting: a friend taps and skims, and at 22 lines
   the line that mattered was the one skipped. A line earns its place only by stopping somebody in
@@ -457,14 +457,13 @@ Everything is `bot.py`. Its self-check is in the same file: `python bot.py --sel
   fired and was caught by a review pass, not by the corpus that had just gone green. The first
   real false positive is worth more than all of them; when one arrives, the two words are in
   `insults.jsonl` and the fix is a corpus line plus a `NOT_THE_BOT` entry.
-- **Neither Windows file has ever run on Windows.** `run-bot.cmd` and `instalar-bot.cmd` were both
-  written on a Mac and only statically checked — ASCII, CRLF, every `goto` has a label, no bare `&`
-  in an `if` — including the launcher's `--take-over` path, which is the mirror of the macOS one
-  whose branches *were* driven. Say "untested" in that word until somebody watches them;
-  `docs/updating.md` lists what to watch and, for the bootstrap, separates the parts that **were**
-  measured here (the tarball URL, what the archive contains, that the unpack cannot touch `.env` or
-  `.venv`, that a truncated download is caught first) from the part that cannot be: whether cmd.exe
-  runs any of it. The likeliest place a friend gets stuck is not the script at all —
+- **The Windows files have run on Windows only up to the token prompt** (2026-10-04, table in
+  `docs/updating.md`). Everything after it — including the launcher's `--take-over` path, the mirror
+  of the macOS one whose branches *were* driven — is still only statically checked (ASCII, every
+  `goto` has a label, no bare `&` in an `if`); say "untested" in that word until somebody watches it.
+  **Line endings are a `.gitattributes` rule, not a static check:** cmd.exe loses the labels of an
+  LF `.cmd`, which killed `run-server.cmd`'s restart loop in every tarball copy until that day, and
+  a clone with `core.autocrlf=true` hides it. The likeliest place a friend gets stuck is not the script at all —
   raw.githubusercontent.com serves a `.cmd` as `text/plain` with no `content-disposition` (measured),
   so the browser is expected to display it and the friend has to save it, which is why the reply
   spends words on Ctrl+S. `/instalar windows` no longer hands out a Git Bash command line at all, so

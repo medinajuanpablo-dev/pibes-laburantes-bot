@@ -11,9 +11,9 @@ rem runs. A downloaded .command on macOS needs the exec bit *and* no quarantine 
 rem a download has neither -- measured, README.md 2.2. That asymmetry is the whole
 rem reason this file is Windows-only. Do not write a macOS twin of it.
 rem
-rem NOT TESTED ON WINDOWS. Written on a Mac; there is no Windows in this project.
-rem What was verified, and how, is in docs/updating.md. Read it before handing this
-rem to the first Windows friend.
+rem Run on Windows 11 on 2026-10-04 from a LOCAL file: download, unpack, stamp and
+rem hand-off all worked. A run from a browser download is still unwatched. What was
+rem verified, and how, is in docs/updating.md.
 rem
 rem Only what Windows already ships, and never an install of anything:
 rem   curl.exe and tar.exe, both in System32 since Windows 10 1803 (build 17063).

@@ -131,7 +131,7 @@ how the group ends up with no bot at all.
 
 The owner cannot keep his laptop on all the time, so hosting rotates: whoever is around
 double-clicks a launcher and hosts the bot until they close the window. `run-bot.command` is the
-macOS one, `run-bot.cmd` the Windows one (**untested on real Windows** — see `docs/updating.md`).
+macOS one, `run-bot.cmd` the Windows one (run on Windows **only up to the token prompt** — see `docs/updating.md`).
 
 **Since 2026-08-19 the rotation has a floor:** an old always-on Windows machine runs `serve.py`,
 which hosts the bot whenever nobody else is, yields the moment the owner starts his own laptop, and
@@ -161,8 +161,8 @@ Three things follow from the design and are not obvious:
   downloaded bootstrap that fetches the repository as a tarball and hands off to `run-bot.cmd` (§2.2).
   It brings its own update channel with it — it re-fetches on every double-click — so **`git push` is
   still the entire release process for both kinds of copy**. Which copy has which updater, and the
-  two rules that stop them contradicting each other, are in `docs/updating.md`. Untested on real
-  Windows, like the launcher beside it.
+  two rules that stop them contradicting each other, are in `docs/updating.md`. Run on Windows from
+  a local file; a browser download of it has not been watched.
 - **Whatever was posted while nobody was hosting still arrives** — `run_polling` is called with
   `drop_pending_updates=False`, so **a host who starts after a gap sees that gap's links delivered
   at startup**, oldest first and one at a time. Telegram only holds updates for ~24 h, so a gap
@@ -257,8 +257,8 @@ Three things make it work, and each was measured on 2026-08-10 from macOS:
   `.env` and `.venv/` are absent from it by construction. Verified by unpacking the real archive
   three times over a folder holding both.
 
-**That the script runs at all is untested**: there is no Windows in this project. `docs/updating.md`
-lists what was measured, what was only read from documentation, and what the first Windows friend
+**The script runs on Windows from a local file** (2026-10-04); what a browser download adds is
+untested. `docs/updating.md` lists what was measured, what was only read from documentation, and what the first Windows friend
 should be watched for.
 
 **A tarball copy and a clone update differently**, which is a real cost of this and not a detail:
@@ -1310,15 +1310,16 @@ a preference.
 ```
 bot.py                    the whole application, plus its self-check
 run-bot.command           the macOS launcher. Committed 100755 or it does not double-click.
-run-bot.cmd               the Windows launcher. Untested on real Windows.
-instalar-bot.cmd          the Windows bootstrap: what /instalar windows links to. §2.2. Untested.
+run-bot.cmd               the Windows launcher. Run on Windows up to the token prompt.
+instalar-bot.cmd          the Windows bootstrap: what /instalar windows links to. §2.2.
+.gitattributes            pins *.cmd to CRLF: cmd.exe loses the labels of an LF batch file
 requirements.txt          the pins, and why yt-dlp is on a nightly — read the file, it says
 README.md                 this file
 EMPEZAR-ACA.md            the friend-facing quickstart, in Spanish. Product copy, not docs.
 AGENTS.md                 the rules an agent must not violate, plus routing
 serve.py                  the always-on host's supervisor. Restarts bot.py, yields to the owner
 instalar-servidor.sh      one-shot installer for the Linux host: apt, clone, venv, pins, systemd
-run-server.cmd            the always-on host's launcher, Windows. Untested, like run-bot.cmd
+run-server.cmd            the always-on host's launcher, Windows. Its loop is proven, serve.py under it is not
 docs/server.md            the 24/7 machine: setup, the mute switch, what it cannot detect
 docs/server-vm.md         why that machine is a Debian VM on a Windows 7 desktop, and its sizing
 docs/updating.md          how the owner ships a change and how a new friend gets set up

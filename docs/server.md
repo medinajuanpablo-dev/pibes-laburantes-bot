@@ -18,7 +18,7 @@ whenever he wants, and this machine gets out of the way and comes back by itself
 
 | piece | what it is |
 |---|---|
-| `run-server.cmd` | a path, a check and a loop. Its only job is restarting `serve.py` if the *interpreter* dies. Cannot be tested from a Mac, so it holds nothing worth testing |
+| `run-server.cmd` | a path, a check and a loop. Its only job is restarting `serve.py` if the *interpreter* dies. Cannot be tested from a Mac, so it holds nothing worth testing — and the loop was still the part that broke: committed LF, its `goto :loop` died in every tarball copy until 2026-10-04 (`docs/updating.md`) |
 | `serve.py` | the supervisor: pull, install a changed pin, probe, run `bot.py` as a child, restart it forever. All the logic, tested on macOS |
 | `/apagar` and `/prender` | the remote control, over Telegram, owner-only. Mutes the bot **without stopping the process**: `.paused` next to `bot.py` is the state, and it survives every restart |
 

@@ -8,8 +8,9 @@ rem .cmd and not .ps1: a PowerShell script does not run when it is double-clicke
 rem -- Windows opens .ps1 in an editor, and the default execution policy would
 rem refuse it anyway. A .cmd runs.
 rem
-rem NOT TESTED ON WINDOWS. It was written on a Mac and there is no Windows here.
-rem Read docs/updating.md before handing it to the first Windows friend.
+rem Run on Windows 11 on 2026-10-04, but only UP TO THE TOKEN PROMPT: the 409
+rem probe, the take-over question and the bot running here are still unwatched.
+rem docs/updating.md has the table of what ran.
 rem
 rem The Spanish below is deliberately written without accents or enye: a .cmd is
 rem read by cmd.exe in the console's OEM codepage, where UTF-8 accents come out as

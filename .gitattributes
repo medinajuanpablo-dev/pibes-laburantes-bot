@@ -1,0 +1,6 @@
+# cmd.exe misreads labels in a .cmd saved with LF line endings. Measured 2026-10-04 on
+# Windows 11: run-server.cmd from the codeload tarball printed "no encuentra la etiqueta
+# por lotes especificada: loop" and its restart loop died on the first restart. This
+# forces CRLF in every checkout AND in `git archive`, which is what codeload serves --
+# core.autocrlf never reaches the tarball, so it cannot be the fix.
+*.cmd text eol=crlf
